@@ -1,0 +1,165 @@
+import os
+import sys
+import argparse
+import numpy as np
+from pathlib import Path
+import SimpleITK as sitk
+from config import (
+    DATA, 
+    DEFAULT_SPACING, 
+    DEFAULT_ORIENTATION, 
+    HU_WINDOW_LOW, 
+    HU_WINDOW_HIGH, 
+    HU_BIN_WIDTH, 
+    NORM_METHOD
+)
+
+def resample_image(itk_image, out_spacing=DEFAULT_SPACING, is_label=False):
+    """Resample image to isotropic spacing."""
+    original_spacing = itk_image.GetSpacing()
+    original_size = itk_image.GetSize()
+    
+    out_size = [
+        int(round(original_size[i] * (original_spacing[i] / out_spacing[i])))
+        for i in range(3)
+    ]
+    
+    resample = sitk.ResampleImageFilter()
+    resample.SetOutputSpacing(out_spacing)
+    resample.SetSize(out_size)
+    resample.SetOutputDirection(itk_image.GetDirection())
+    resample.SetOutputOrigin(itk_image.GetOrigin())
+    resample.SetTransform(sitk.Transform())
+    resample.SetDefaultPixelValue(itk_image.GetPixelIDValue())
+
+    if is_label:
+        resample.SetInterpolator(sitk.sitkNearestNeighbor)
+    else:
+        resample.SetInterpolator(sitk.sitkBSpline)
+
+    return resample.Execute(itk_image)
+
+def apply_clinical_normalization(image, method=NORM_METHOD):
+    """Apply global intensity normalization."""
+    if method == "none":
+        return image
+    
+    arr = sitk.GetArrayFromImage(image).astype(np.float32)
+    
+    if method == "zscore":
+        mean = np.mean(arr)
+        std = np.std(arr)
+        arr = (arr - mean) / (std + 1e-8)
+    elif method == "minmax":
+        min_val = np.min(arr)
+        max_val = np.max(arr)
+        arr = (arr - min_val) / (max_val - min_val + 1e-8)
+        
+    normalized_image = sitk.GetImageFromArray(arr)
+    normalized_image.CopyInformation(image)
+    return normalized_image
+
+def apply_intensity_discretization(image, bin_width=HU_BIN_WIDTH):
+    """Apply intensity discretization (binning) to reduce noise."""
+    if bin_width <= 0:
+        return image
+    
+    arr = sitk.GetArrayFromImage(image).astype(np.float32)
+    # Binning: floor(val / width) * width
+    arr = np.floor(arr / bin_width) * bin_width
+    
+    discretized_image = sitk.GetImageFromArray(arr)
+    discretized_image.CopyInformation(image)
+    return discretized_image
+
+def ingest_series(dicom_dir, volume_name):
+    print(f"--- Ingesting: {dicom_dir} (Name: {volume_name}) ---")
+    
+    # 1. Load DICOM
+    reader = sitk.ImageSeriesReader()
+    dicom_names = reader.GetGDCMSeriesFileNames(str(dicom_dir))
+    
+    # NEW: Recursive Search for nested DICOM structures
+    if not dicom_names:
+        print("  Direct folder contains no series. Searching subdirectories...")
+        all_series = []
+        for root, dirs, files in os.walk(dicom_dir):
+            series_files = reader.GetGDCMSeriesFileNames(root)
+            if series_files:
+                all_series.append((root, len(series_files), series_files))
+        
+        if all_series:
+            # Pick the largest series (to avoid localizers/scouts)
+            all_series.sort(key=lambda x: x[1], reverse=True)
+            best_dir, best_count, best_names = all_series[0]
+            print(f"  Found main volume in: {best_dir} ({best_count} slices)")
+            dicom_names = best_names
+        else:
+            print(f"Error: No DICOM series found in {dicom_dir} or its subdirectories.")
+            return
+    
+    reader.SetFileNames(dicom_names)
+    img = reader.Execute()
+    
+    # 2. Reorient to standard (LPS)
+    print(f"Original Orientation: {sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(img.GetDirection())}")
+    img = sitk.DICOMOrient(img, DEFAULT_ORIENTATION)
+    
+    # 3. HU Windowing (Clipping)
+    print(f"Applying HU Windowing: [{HU_WINDOW_LOW}, {HU_WINDOW_HIGH}]")
+    img = sitk.Clamp(img, lowerBound=HU_WINDOW_LOW, upperBound=HU_WINDOW_HIGH)
+    
+    # 4. Resample to 0.5mm Isotropic (B-spline)
+    print(f"Original Spacing: {img.GetSpacing()}")
+    print(f"Target Spacing:   {DEFAULT_SPACING} (B-spline)")
+    resampled_image = resample_image(img, out_spacing=DEFAULT_SPACING)
+    
+    # 5. Clinical Denoising: Anisotropic Diffusion
+    print("Applying Gradient Anisotropic Diffusion denoising...")
+    resampled_image = sitk.Cast(resampled_image, sitk.sitkFloat32)
+    denoiser = sitk.GradientAnisotropicDiffusionImageFilter()
+    denoiser.SetNumberOfIterations(5)
+    denoiser.SetTimeStep(0.03)
+    denoiser.SetConductanceParameter(3.0)
+    denoised_image = denoiser.Execute(resampled_image)
+    
+    # 6. Intensity Discretization
+    print(f"Applying Intensity Discretization (Bin Width: {HU_BIN_WIDTH} HU)...")
+    discretized_image = apply_intensity_discretization(denoised_image, bin_width=HU_BIN_WIDTH)
+    
+    # 7. Global Normalization
+    print(f"Applying Global Normalization ({NORM_METHOD})...")
+    normalized_image = apply_clinical_normalization(discretized_image, method=NORM_METHOD)
+    
+    # Save Preprocessed volume
+    OUTPUT_DIR = DATA / "NIfTI"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Raw resampled (but windowed) - for traditional AI
+    raw_path = OUTPUT_DIR / f"{volume_name}_raw.nii.gz"
+    sitk.WriteImage(resampled_image, str(raw_path))
+    print(f"Saved RAW resampled volume to: {raw_path}")
+    
+    # Prepped (Denoised, Discretized, Normalized) - for clinical grade pipeline
+    prepped_path = OUTPUT_DIR / f"{volume_name}_prepped.nii.gz"
+    sitk.WriteImage(normalized_image, str(prepped_path))
+    print(f"Saved PREPPED refined volume to: {prepped_path}")
+    
+    print(f"Final Size: {normalized_image.GetSize()}")
+    print("-" * 30)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Ingest DICOM series to NIfTI with clinical preprocessing")
+    parser.add_argument("input_dir", type=str, help="Path to DICOM directory")
+    parser.add_argument("--name", type=str, default=None, help="Output filename (optional)")
+    
+    args = parser.parse_args()
+    
+    input_path = Path(args.input_dir)
+    if not input_path.exists():
+        print(f"Error: Path {input_path} does not exist.")
+        sys.exit(1)
+        
+    output_name = args.name if args.name else input_path.name
+    
+    ingest_series(input_path, output_name)

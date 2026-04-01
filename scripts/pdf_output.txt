@@ -1,0 +1,1145 @@
+Sub-Millimeter Accurate 3D Bone 
+Segmentation from CT for Robotic Total 
+Knee Arthroplasty: A Comprehensive 
+Technical and Implementation Plan 
+Introduction to Advanced Orthopedic Imaging and 
+Robotic Arthroplasty 
+Total Knee Arthroplasty (TKA) is a definitive surgical intervention for end-stage knee 
+osteoarthritis, a degenerative joint disease characterized by the progressive loss of hyaline 
+cartilage, subchondral bone sclerosis, and the formation of osteophytes. The primary objective 
+of TKA is to alleviate pain and restore physiological joint kinematics through the precise 
+resection of diseased anatomical structures and the subsequent implantation of matched 
+prosthetic components. Historically, conventional TKA has relied heavily on manual 
+instrumentation, intramedullary rods, and visual alignment strategies. These manual 
+methodologies, while standardized, inherently suffer from a high degree of inter-operative and 
+intra-observer variability. Such variations frequently result in mechanical axis deviations, 
+suboptimal soft-tissue balancing, and alterations to the physiological femoral and tibial joint 
+lines.1 Consequently, empirical data suggests that a significant percentage of patients remain 
+dissatisfied with their functional outcomes following conventional TKA, primarily due to residual 
+pain and kinematic instability driven by component malalignment.1 
+The advent of robotic-assisted TKA (RTKA) has fundamentally transformed this clinical 
+paradigm by introducing patient-specific, data-driven surgical planning and highly controlled 
+execution mechanisms. Modern robotic platforms, including semi-active systems utilizing 
+haptic boundaries and fully active autonomous milling systems, demand an exceptionally high 
+degree of spatial accuracy to function correctly and safely.3 These systems enable surgeons to 
+conduct comprehensive preoperative simulations, optimizing the simulative component 
+positioning to ensure accurate angles for varus-valgus, eversion-retroversion, and 
+internal-external rotation.5 The foundation of this robotic precision lies in the preoperative 
+generation of a high-fidelity, three-dimensional (3D) virtual model of the patient’s specific joint 
+anatomy, derived from high-resolution medical imaging. 
+While intraoperative imageless systems exist—relying on the manual mapping of bony 
+landmarks using optical probes—they are limited by the precision of the surgeon's data 
+collection during the procedure and lack the detailed foresight provided by preoperative 
+imaging.5 Therefore, CT-based image-guided robotic systems have become the gold standard 
+for complex reconstructions. However, the translation of raw computed tomography (CT) 
+images into actionable 3D geometrical models requires the segmentation of bone from 
+surrounding soft tissues, cartilage, and air. Traditionally, this segmentation process has been a 
+semi-automatic, highly time-consuming endeavor requiring extensive manual intervention and 
+slice-by-slice correction by trained clinicians or biomedical engineers.6 Such 
+operator-dependent processes struggle with the complex pathological features of the arthritic 
+knee, where joint space narrowing can make the femur and tibia appear fused, and sclerosis 
+alters the expected radiodensity of the bone.8 
+To achieve the sub-millimeter geometric accuracy necessary for precision robotics—where 
+surface deviations must be maintained strictly at 
+ mm to ensure correct virtual 
+stereotactic boundaries and prevent catastrophic surgical errors like incomplete resections or 
+ligamentous damage—advanced artificial intelligence (AI) and deep learning frameworks are 
+absolutely required.9 The implementation of these advanced computational pipelines 
+represents a critical bottleneck in the widespread scalability of personalized orthopedics. This 
+report delineates an exhaustive, expert-level technical and implementation plan for achieving 
+fully automated, sub-millimeter accurate 3D bone segmentation from CT scans. The analysis 
+spans the entirety of the computational workflow: beginning with rigorous DICOM data 
+preprocessing and the physical principles of X-ray attenuation, progressing through 
+state-of-the-art convolutional neural network (CNN) architectures including the 
+self-configuring nnU-Net and the specialized Combined Edge Loss UNet (CEL-UNet), detailing 
+the mathematics of topologically correct mesh reconstruction and optimization, defining the 
+algorithms for intraoperative coordinate registration, and finally establishing the stringent 
+clinical validation metrics required for successful deployment in robotic arthroplasty. 
+Physical Principles and DICOM Preprocessing 
+Optimization 
+The accuracy, reliability, and generalizability of any deep learning segmentation algorithm are 
+inherently bounded by the quality and consistency of the input data. In the context of 
+orthopedic CT imaging, the raw data stored in the Digital Imaging and Communications in 
+Medicine (DICOM) format exhibits significant heterogeneity. This variance arises from 
+differences in scanner hardware across manufacturers, variable acquisition protocols, differing 
+tube voltages, and a multitude of proprietary reconstruction kernels.11 A robust, mathematically 
+rigorous preprocessing pipeline is therefore mandatory to harmonize the data space before it 
+is subjected to neural network feature extraction. Failure to standardize the input data leads to 
+severe domain shifts, where a neural network trained on one dataset fails catastrophically 
+when deployed in a novel clinical environment. 
+Hounsfield Unit (HU) Normalization and Intensity Discretization 
+Computed tomography imaging is predicated on the physical attenuation of X-rays as they 
+pass through tissues of varying densities. This attenuation is quantified universally on the 
+Hounsfield Unit (HU) scale, a standardized linear transformation of the original linear 
+attenuation coefficient measurement. The HU scale is calibrated against reference materials, 
+defining the radiodensity of distilled water at standard temperature and pressure as exactly 
+ 
+HU, and the radiodensity of air as 
+ HU.13 Because human bone possesses a significantly 
+higher physical density and effective atomic number than surrounding soft tissues such as 
+muscle, fat, and cartilage, it occupies the upper echelons of the HU spectrum. However, the 
+density of bone is not homogeneous; it exhibits a highly variable gradient. Cancellous 
+(trabecular or spongy) bone, which provides structural support while minimizing weight, 
+typically ranges from 
+ to 
+ HU.13 In contrast, the dense cortical bone that forms 
+the outer shell of the femur and tibia exhibits much higher X-ray attenuation, spanning from 
+ up to 
+ HU.13 
+Tissue / Material Type 
+Standard Hounsfield Unit 
+(HU) Range 
+Relevance to TKA 
+Segmentation 
+Air 
+ 
+Background reference; easily 
+excluded via thresholding. 
+Fat / Adipose Tissue 
+ to 
+ 
+Intra-articular fat pads; must 
+be distinctly separated from 
+bone boundaries. 
+Water / Fluids 
+ 
+Baseline calibration reference; 
+overlaps with synovial fluid 
+properties. 
+Soft Tissue / Muscle 
+ to 
+ 
+Crucial to separate from 
+subchondral bone, especially in 
+regions of severe cartilage loss. 
+Cancellous Bone 
+ to 
+ 
+Internal bone structure; lower 
+density can sometimes overlap 
+with dense soft tissues. 
+Cortical Bone 
+ to 
+ 
+The primary target for 
+boundary detection; dictates 
+the hard limits for robotic 
+milling. 
+Metallic Artifacts 
+ 
+Hardware from previous 
+surgeries causing severe 
+beam-hardening artifacts; 
+requires algorithmic 
+suppression. 
+The raw pixel data extracted directly from a DICOM file (
+) is often stored as 
+12-bit or 16-bit integers and does not inherently represent the standardized HU scale. It must 
+first be computationally converted using the metadata tags specific to each image slice, 
+namely the RescaleSlope and RescaleIntercept.14 The conversion follows the linear equation: 
+ 
+Once the true HU values are established, intensity normalization must be applied to mitigate 
+the effects of outlier noise. In orthopedic imaging, metal artifacts from previous fixation 
+devices or beam-hardening artifacts caused by the dense cortical shafts can cause extreme 
+pixel values that artificially compress the useful dynamic range of the image during 
+normalization.17 A highly effective preprocessing technique is the application of a specific bone 
+windowing protocol. For the segmentation of the knee joint, the continuous HU values are 
+commonly clipped (Winsorized) to a targeted diagnostic range. This restricts intensities below a 
+lower bound (e.g., 
+ HU, effectively neutralizing air and fat) and above an upper threshold (e.g., 
+ HU), standardizing the contrast and stabilizing the gradient descent optimization of 
+the neural network during the training phase.19 
+Following this windowing process, global intensity normalization is performed to project the 
+clipped HU values into a standardized floating-point tensor range suitable for deep learning 
+ingestion, typically scaling the data to a mean of 
+ and a variance of 
+ (Z-score normalization), 
+or mapping it to an absolute range of 
+ to 
+.17 Furthermore, advanced intensity 
+discretization (binning) strategies are frequently utilized to reduce background noise and 
+standardize the texture features of the bone across different scanner hardware. Empirical 
+studies demonstrate that resampling the intensity into fixed bin widths (e.g., 
+ or 
+ HU bins) 
+preserves the physical relationship of the CT attenuation while significantly minimizing the 
+impact of scanner-specific noise profiles, thereby enhancing the reproducibility of the 
+extracted morphological features.20 
+Isotropic Resampling and Spatial Standardization 
+A critical geometric challenge inherent in processing clinical CT datasets is the variation in voxel 
+dimensions. Clinical scans are predominantly acquired with anisotropic resolution, where the 
+in-plane resolution (the x-axis and y-axis of the axial slices) is highly detailed (e.g., 
+ mm to 
+ mm), but the slice thickness (the z-axis) is significantly larger (e.g., 
+ mm to 
+ mm) 
+to minimize patient radiation exposure and reduce acquisition time.22 These anisotropic voxels 
+introduce severe geometric distortions, most notably staircase and terracing artifacts during 
+3D mesh reconstruction, which severely degrade the surface quality of the bone model.24 
+Moreover, from a machine learning perspective, anisotropic data impedes the ability of 3D 
+convolutional kernels to learn rotationally invariant spatial features, as a standard 
+ 
+kernel would encompass a vastly different physical volume in the z-direction compared to the 
+transverse plane. 
+To resolve these geometric inconsistencies, continuous 3D isotropic resampling must be 
+implemented prior to neural network inference. This is achieved using high-order mathematical 
+interpolation algorithms, such as trilinear or third-order B-spline interpolation.26 By 
+standardizing the physical spacing to an isotropic resolution of 
+ mm$^3$ or 
+finer (e.g., 
+ mm$^3$ or even 
+ mm$^3$ depending on 
+computational memory constraints), the spatial limits and aspect ratios of the anatomical 
+objects are perfectly preserved.21 This geometric homogenization ensures that a volumetric 
+convolutional filter observes the exact same physical distance in every direction, which is a 
+fundamental prerequisite for achieving the sub-millimeter surface deviation required for 
+custom TKA resection guides and robotic haptic boundaries. 
+Preprocessing 
+Stage 
+Algorithmic Method 
+Parameter 
+Optimization 
+Impact on Robotic 
+TKA Accuracy 
+HU Conversion 
+Linear 
+Transformation 
+Utilizing RescaleSlope 
+and RescaleIntercept 
+from DICOM 
+headers. 
+Ensures consistent 
+physical density 
+mapping across 
+different hospital 
+scanners. 
+Intensity 
+Windowing 
+Winsorization / 
+Clipping 
+Lower bound: 
+ 
+HU. Upper bound: 
+ HU. 
+Removes soft-tissue 
+noise and metallic 
+beam-hardening 
+artifacts. 
+Spatial Resampling 
+Third-order B-spline 
+Interpolation 
+Target isotropic 
+spacing: 
+ 
+mm$^3$ or 
+ 
+mm$^3$. 
+Eliminates Z-axis 
+staircase artifacts; 
+enables rotationally 
+invariant CNN feature 
+extraction. 
+Artifact Denoising 
+Non-linear 
+Anisotropic Diffusion 
+Gaussian filtering (
+, kernel = 
+) or Wavelet 
+methods. 
+Smooths marrow 
+homogeneity while 
+strictly preserving 
+high-frequency cortical 
+edges. 
+Anisotropic Filtering and Edge-Preserving Denoising 
+Because the mathematical process of resampling and interpolation can inadvertently introduce 
+blurring across tissue boundaries or amplify inherent quantum mottle (image noise), advanced 
+denoising filters must be applied with extreme caution. The primary risk during denoising is the 
+obliteration of the critical Bone-Cartilage Interface (BCI) or the smoothing away of thin 
+osteophytes, both of which are critical for accurate implant sizing and robotic registration.27 To 
+mitigate this, non-linear anisotropic diffusion filtering, localized Gaussian filtering (e.g., utilizing 
+a 
+ with a defined kernel size), and wavelet-based denoising techniques (such as 
+BayesShrink) are highly effective.17 These advanced filters operate by dynamically adjusting the 
+degree of smoothing based on the local image gradient. They apply aggressive smoothing to 
+homogeneous regions (such as the interior trabecular marrow cavity) while sharply reducing 
+the smoothing effect at regions of high gradient magnitude, thereby strictly preserving the 
+high-frequency edge information representing the vital cortical bone boundaries. 
+Deep Learning Architectures for Sub-Millimeter Bone 
+Segmentation 
+The computational extraction of complex bone geometry from volumetric CT data has evolved 
+rapidly, transitioning from classical computer vision techniques—such as region-growing, 
+adaptive thresholding, and statistical active contour models—to fully supervised deep learning 
+paradigms.7 Convolutional Neural Networks (CNNs), specifically those based on the symmetric 
+encoder-decoder U-Net topology, have come to dominate medical image segmentation. The 
+architectural brilliance of the U-Net lies in its skip connections, which bypass the informational 
+bottleneck by directly fusing high-resolution spatial details from the contracting encoder 
+pathway with the low-resolution, high-level semantic context generated in the expanding 
+decoder pathway.31 
+For the specific demands of robotic TKA planning, however, standard 3D U-Nets often 
+encounter performance ceilings when confronted with the severe pathological realities of the 
+arthritic knee. Advanced knee osteoarthritis introduces profound anatomical deformations: 
+severe joint space narrowing causes the femoral condyles and tibial plateau to appear 
+completely fused on imaging; extensive osteophyte formation creates unpredictable, jagged 
+bony protrusions; and subchondral sclerosis radically alters the expected radiodensity 
+gradients of the articulating surfaces.8 To overcome these intricate anatomical challenges and 
+reliably separate closely articulating surfaces with the requisite sub-millimeter precision, highly 
+specialized and dynamically configuring deep learning architectures have been developed and 
+rigorously validated. 
+The Self-Configuring nnU-Net Framework 
+The nnU-Net ("no-new-Net") framework represents a critical paradigm shift in medical image 
+segmentation. Rather than proposing a novel, overly complex network topology, nnU-Net 
+posits that standard U-Net architectures can achieve state-of-the-art performance if the 
+surrounding hyperparameters and preprocessing steps are perfectly optimized.33 The nnU-Net 
+is a self-configuring deep learning framework that automatically and dynamically adapts its 
+architecture, data augmentation strategies, and training parameters to the specific statistical 
+fingerprint of the input dataset.34 
+During its initialization phase, nnU-Net analyzes the dataset to extract heuristic rules regarding 
+median image shapes, voxel spacing, class ratios, and intensity distributions. Based on these 
+empirical rules, it determines the optimal network depth, the number of pooling operations, the 
+optimal batch size dictated by GPU memory constraints, and the most effective patch size for 
+training. In comprehensive, multicenter benchmarking, nnU-Net has consistently demonstrated 
+state-of-the-art performance for thin structure segmentation and large organ boundary 
+delineation, explicitly without requiring manual heuristic tuning.33 
+The framework operates by training an ensemble of models—typically a 2D U-Net, a 3D 
+full-resolution U-Net, and a 3D low-resolution U-Net combined with a high-resolution 
+refinement cascade—and automatically selecting the configuration that yields the highest 
+validation metrics.36 For knee bone segmentation, implementations utilizing the nnU-Net 
+framework have achieved extraordinary, sub-millimeter accuracy. Peer-reviewed validations 
+report a mean absolute surface distance (AvgD) ranging from 
+ to 
+ mm and Dice 
+Similarity Coefficients (DSC) of 
+ for both the femur and tibia across diverse 
+pathological states.36 The integration of advanced feature extractors, such as ResNet or 
+ConvNeXt backbones, within the nnU-Net encoder structure further enhances its 
+representational power and robustness, establishing it as a highly reliable baseline for fully 
+automated clinical workflows intended for robotic surgery.37 
+The Combined Edge Loss UNet (CEL-UNet) 
+While volumetric overlap metrics such as the Dice score often reach saturation near 
+ with 
+standard networks, these models frequently produce localized boundary errors. In the context 
+of RTKA, a single geometric error at the condylar boundary or a failure to accurately map a 
+narrow joint space directly translates into faulty robotic cutting trajectories and malaligned 
+prosthetics. To specifically address the preservation of precise anatomical contours, the 
+Combined Edge Loss UNet (CEL-UNet) was engineered to boost boundary segmentation 
+quality in severely osteoarthritic knees.8 
+The architectural novelty of the CEL-UNet involves modifying the standard U-Net decoding 
+path by splitting it into two distinct, parallel branches: 
+1.​ Region-Aware Branch: Devoted to the standard volumetric semantic segmentation of 
+the bone mass, ensuring global structural coherence. 
+2.​ Contour-Aware Branch: A specialized pathway specifically tasked with edge detection 
+and the precise localization of the bone boundaries. 
+Crucially, the architecture features directed connections from the contour-aware branch to the 
+region-aware branch, progressively injecting edge-specific feature maps at different decoding 
+scales. Furthermore, it employs Pyramidal Edge Extraction (PEE) within the contour branch to 
+perform multi-resolution edge processing, allowing the network to capture both the 
+macroscopic shape of the bone and the microscopic details of the articulating surfaces.8 By 
+explicitly forcing the network to learn the exact topological boundaries through dual decoders, 
+CEL-UNet dramatically reduces surface reconstruction errors. Validation on large datasets of 
+TKA patients demonstrated exceptional precision, yielding median 3D reconstruction errors of 
+just 
+ mm for the tibia and 
+ mm for the femur. This architectural enhancement 
+successfully reduced the Hausdorff Distance by more than half compared to standard U-Net 
+models, thereby guaranteeing the tight geometric tolerances required for personalized surgical 
+instruments and robotic registration.39 
+DDA-Transformer and Advanced Attention Mechanisms 
+Pushing the boundaries of spatial awareness even further, recent architectures have begun 
+integrating Transformer blocks with traditional CNNs, demonstrating immense promise in 
+orthopedic imaging. Pure CNNs are inherently restricted by the localized nature of their 
+convolutional receptive fields, which can lead to a loss of global anatomical context, particularly 
+in large field-of-view CT scans. The Dual-path Double Attention Transformer 
+(DDA-Transformer) mitigates this by utilizing self-attention mechanisms to capture long-range 
+anatomical dependencies that standard convolutions might miss.41 
+By analyzing the entire spatial context of the knee joint simultaneously, DDA-Transformer 
+models establish a robust understanding of the relational geometry between the femur, tibia, 
+patella, and fibula. These transformer-enhanced models have demonstrated significantly faster 
+inference speeds—often completing the segmentation of an entire CT volume in under 
+ 
+seconds—while outperforming traditional 3D U-Nets in boundary precision.41 In clinical 
+validation studies directly comparing manual execution against robotic-assisted TKA systems 
+driven by DDA-Transformer segmentations, the deep learning pipeline resulted in highly robust 
+component sizing and alignment predictions, ultimately delivering statistically significant 
+improvements in surgical accuracy.41 
+Neural Network 
+Architecture 
+Core Structural 
+Innovation 
+Validation 
+Performance (AvgD 
+/ RMSE) 
+Clinical Utility in RTKA 
+Standard 3D U-Net 
+Encoder-Decoder 
+with Skip 
+Connections 
+ to 
+ mm 
+Baseline performance; 
+struggles with severe 
+osteophytes and fused 
+joint spaces. 
+nnU-Net (3D Full 
+Res) 
+Dynamic 
+self-configuration of 
+hyperparameters 
+ mm 
+Highly robust, 
+plug-and-play 
+architecture; achieves 
+consistent 
+sub-millimeter 
+precision. 
+CEL-UNet 
+Dual decoding 
+branches (Region + 
+Contour) with PEE 
+ to 
+ mm 
+Exceptional edge 
+preservation; ideal for 
+extracting 
+patient-specific 
+anatomical contours. 
+DDA-Transformer 
+Integration of CNN 
+with Self-Attention 
+blocks 
+ mm 
+Rapid inference speed; 
+excellent global 
+contextual awareness 
+for multi-bone 
+segmentation. 
+Advanced Loss Function Formulations for Boundary 
+Precision 
+The optimization of these sophisticated deep learning models relies entirely on the 
+mathematical formulation of their loss functions. The loss function dictates the penalization 
+strategy during backpropagation, guiding the network toward the desired output. A significant 
+shortcoming of the standard categorical cross-entropy loss is that it implicitly assumes 
+homogeneous weighting across an image volume. This is highly detrimental in medical image 
+segmentation, where the boundaries of the bone constitute only a minuscule fraction of the 
+total voxel count, leading the network to prioritize the massive background over the critical 
+edges.44 Achieving reliable, sub-millimeter accuracy mandates the implementation of hybrid, 
+boundary-aware loss configurations that explicitly prioritize topological correctness.45 
+The total loss used for training, denoted 
+, is frequently defined as a highly tuned, 
+weighted summation of several distinct regional and contour penalties 34: 
+1. Volumetric Overlap Optimization (Dice and Focal Loss) 
+The fundamental driver for regional segmentation is the Dice Loss (
+). Derived from the 
+Sørensen–Dice coefficient, this loss function inherently mitigates the severe class imbalance 
+between the small target bone volume and the vast anatomical background by directly 
+maximizing the spatial overlap.46 The mathematical formulation is defined as: 
+ 
+where 
+ represents the predicted probability of the voxel belonging to the bone class, and 
+ 
+represents the ground truth binary label. While highly effective at ensuring the entire bone 
+mass is identified, Dice loss alone is often insufficient for refining intricate boundaries. 
+Therefore, it is frequently combined with Focal Loss, which introduces a modulating factor 
+ to adaptively focus the training gradients on the hardest-to-predict 
+voxels—typically those residing directly on the bone-cartilage interface.48 
+2. Distance-Weighted Cross-Entropy and Boundary Loss 
+To compel the network to respect the exact topological boundaries, specialized edge losses 
+are integrated. In models such as the CEL-UNet, the standard Categorical Cross-Entropy (CCE) 
+loss is augmented with distance maps derived directly from the true ground-truth boundaries.8 
+This Distance-Weighted Cross-Entropy heavily penalizes false positive and false negative 
+predictions that occur in close physical proximity to the true edge, forcing the network to 
+refine the interface between the articulating bones. The boundary loss evaluates the Euclidean 
+distance between the predicted contour and the ground truth contour, dynamically scaling the 
+penalty so that errors located further from the true boundary incur exponentially higher 
+losses.50 
+3. Adversarial and Shape-Aware Constraints 
+Certain advanced frameworks integrate a Generative Adversarial Network (GAN) topology to 
+enforce global anatomical coherence. In these systems, a secondary discriminator network 
+evaluates the shape consistency of the generated segmentation mask against a database of 
+known, anatomically correct priors.36 The adversarial loss (
+) serves as a high-level spatial 
+regulator. By punishing predictions that do not mathematically resemble a human femur or 
+tibia, the adversarial loss prevents the generation of biologically impossible geometries—such 
+as internal holes in the cortical shaft or the artificial fusion of the femoral condyles—which 
+standard U-Nets occasionally produce when faced with severe imaging artifacts.36 
+Topologically Correct 3D Mesh Reconstruction and 
+Geometric Optimization 
+The direct output of a deep learning segmentation network is a discrete 3D binary or 
+probabilistic voxel mask. For application in robotic surgery, this block-like volumetric 
+representation must be converted into a continuous geometric surface—a polygonal mesh 
+consisting of vertices, connected edges, and triangular faces.7 This mesh serves as the 
+definitive digital twin of the patient’s anatomy, upon which all surgical planning, mechanical axis 
+calculation, and intraoperative registration are executed. 
+Marching Cubes 33 and Topological Fidelity 
+The foundational algorithm for extracting an isosurface from discrete volumetric data is the 
+Marching Cubes (MC) algorithm. The standard MC algorithm evaluates the eight corners of 
+every voxel cube against a defined scalar threshold to determine the intersecting surface 
+polygons, based on 
+ possible intersection configurations (which are simplified by 
+rotational and reflective symmetry to 
+ base cases).53 
+However, the original 15-case MC algorithm is mathematically susceptible to face and internal 
+ambiguities. These ambiguities occur when the trilinear interpolant behavior within the cube is 
+uncertain, particularly when face vertices possess alternating signs. This mathematical 
+uncertainty results in the generation of "holes," non-manifold edges, and topological 
+discontinuities.54 Such topological errors are catastrophic for robotic systems, which rely on 
+the mesh to calculate surface normals for registration and to generate impenetrable haptic 
+boundaries. To guarantee a completely watertight and manifold surface, advanced orthopedic 
+implementations utilize the Marching Cubes 33 variant (originally proposed by Chernyaev). 
+This advanced algorithm extends the base configurations to 
+ topologically distinct cases, 
+employing complex asymptotic deciders to resolve face ambiguities and construct 
+mathematically closed, topologically correct isosurfaces under all edge conditions.53 
+Feature-Preserving Mesh Decimation 
+The raw mesh generated from high-resolution, sub-millimeter CT segmentation is excessively 
+dense, often containing millions of microscopic triangles. This massive computational weight 
+severely hinders the real-time processing capabilities required for intraoperative robotic 
+navigation, collision detection rendering, and dynamic kinematic simulation.57 Mesh decimation 
+(or simplification) is strictly required to reduce the polygon count while rigorously preserving 
+the precise anatomical volume, boundary features, and underlying geometry. 
+The industry-standard mathematical approach for compressing surgical models without losing 
+precision is the Quadric Error Metric (QEM) decimation algorithm.59 QEM operates by 
+iteratively collapsing vertex pairs (edges) based on a highly localized geometric optimality 
+criterion. The computational cost of collapsing an edge into a single new vertex is calculated 
+based on the sum of squared distances from the proposed new vertex to the planes of the 
+original supporting triangles. By leveraging anisotropic processing principles, QEM adaptively 
+retains highly dense clusters of triangles in regions exhibiting high surface curvature (e.g., the 
+complex contours of the femoral condyles, the intercondylar notch, and irregular osteophytes), 
+while aggressively simplifying and merging triangles in flat, featureless regions (e.g., the 
+smooth diaphysis of the femoral shaft).61 This intelligent, feature-preserving compression 
+guarantees that the structural integrity and sub-millimeter accuracy of the articulating surfaces 
+are maintained, while simultaneously reducing processing runtimes from hours to minutes.63 
+Surface Smoothing: Laplacian vs. Taubin Algorithms 
+Because the isosurface is extracted from a grid of discrete voxels, it inherently exhibits 
+"staircase" or terracing artifacts reflecting the resolution of the original CT scan. To achieve a 
+biologically realistic, smooth surface that accurately mimics the patient's true anatomy—a 
+necessity for accurate optical probe tracking and surface registration—the digital mesh must 
+undergo mathematical smoothing. However, careless application of smoothing algorithms will 
+rapidly destroy the sub-millimeter accuracy painstakingly achieved by the neural network, 
+altering critical distances and invalidating the surgical plan.25 
+The two primary algorithms utilized in medical surface processing are Laplacian and Taubin 
+smoothing, which exhibit vastly different geometric behaviors: 
+●​ Laplacian Smoothing: This algorithm computes a new spatial coordinate for each vertex 
+by calculating the average position of its immediate adjacent neighbors. While 
+computationally inexpensive and highly effective at removing noise, pure Laplacian 
+filtering invariably causes substantial volumetric shrinkage over successive iterations. 
+More critically, it induces the rapid erosion of sharp, clinically vital anatomical features, 
+such as the condylar ridges and the tibial spines.59 
+●​ Taubin Smoothing: To entirely counteract the volumetric shrinkage inherent in Laplacian 
+flows, Taubin smoothing was developed as a non-shrinking, low-pass spatial filter. It 
+operates through two alternating, iterative steps: an inward Laplacian shrinking step 
+(controlled by a positive scaling factor 
+, where 
+) immediately followed by a 
+compensatory outward inflation step (controlled by a negative scaling factor 
+, where 
+ and 
+).25 
+By carefully calibrating these opposing parameters (for instance, utilizing a Gaussian kernel size 
+of 
+ and setting 
+ and 
+), the Taubin smoothing algorithm acts as an 
+optimal low-pass filter. It successfully eliminates high-frequency staircase artifacts and 
+quantum noise while strictly preserving the global volume, overall shape, and precise spatial 
+coordinates of the bone.67 Rigorous engineering evaluations have firmly established that 
+applying a carefully controlled, low-iteration Taubin smoothing protocol, coupled with a 
+moderate QEM simplification factor (e.g., a reduction factor of 
+), yields the optimal balance 
+of computational efficiency and geometric fidelity, maintaining ultimate 3D reconstruction 
+errors consistently beneath 
+ mm.55 
+Mesh Processing 
+Stage 
+Primary Algorithm 
+Utilized 
+Mathematical 
+Mechanism 
+Impact on Robotic 
+Surgery Tolerances 
+Isosurface 
+Extraction 
+Marching Cubes 33 
+Resolves 
+ 
+topologic ambiguities 
+via asymptotic 
+deciders. 
+Guarantees a 
+watertight, manifold 
+surface essential for 
+defining haptic milling 
+boundaries. 
+Polygon Decimation 
+Quadric Error Metric 
+(QEM) 
+Edge collapse 
+minimizing distance 
+to original triangle 
+planes. 
+Reduces 
+computational load by 
+ while 
+selectively preserving 
+high-curvature 
+condyles. 
+Surface Smoothing 
+Taubin Filter 
+(Low-pass) 
+Two-step 
+predictor-corrector (
+ shrink, 
+ expand). 
+Eliminates 
+voxel-staircase 
+artifacts without 
+causing the volume 
+shrinkage seen in 
+Laplacian filters. 
+Automated Anatomical Landmarking and Mechanical 
+Axis Extraction 
+In the realm of robotic total knee arthroplasty, the ultimate clinical utility of the segmented and 
+smoothed 3D mesh is its function as a navigable, mathematically rigorous map of the patient. 
+To execute the surgical intervention, the preoperative planning software must utilize this digital 
+twin to establish the precise coordinate geometry necessary for prosthetic alignment. 
+Definition of Patient-Specific Reference Axes 
+The preoperative planning phase determines the exact spatial orientation and volumetric 
+seating of the femoral and tibial components. This complex 3D puzzle requires the rigid 
+definition of patient-specific reference axes, predominantly relying on the mechanical axes of 
+the lower limb.70 
+●​ Femoral Mechanical Axis: Defined mathematically as a 3D vector connecting the center 
+of the femoral head (hip center) to the center of the distal femur (the deepest point of the 
+intercondylar notch).5 
+●​ Tibial Mechanical Axis: Defined as a vector running from the center of the proximal tibial 
+plateau to the center of the ankle joint (the midpoint of the tibial plafond or talar dome).73 
+Historically, defining these critical coordinates required laborious manual annotation by the 
+surgeon on 2D radiographs or 3D CT slices. This manual landmarking is highly time-consuming 
+and introduces significant intra- and inter-observer variability, which can directly propagate 
+into angular malalignment of the final implant.75 
+Algorithmic Automation of Landmarking 
+Advanced computational pipelines now completely automate this process, significantly 
+reducing preparation time while standardizing the geometrical outputs. This automation is 
+typically achieved through the non-rigid deformation and spatial fitting of Statistical Shape 
+Models (SSMs), or through the deployment of targeted Convolutional Neural Networks (such as 
+modified ResNet50 or VGG16 architectures) that treat landmarking as a coordinate regression 
+problem.42 
+These automated algorithms analyze the segmented 3D bone mesh and mathematically 
+identify key morphological parameters. Beyond the primary mechanical axes, the algorithms 
+extract secondary, yet highly critical, landmarks including the surgical transepicondylar axis 
+(TEA), the posterior condylar axis (PCA), the anterior-posterior (AP) axis (Whiteside’s line), and 
+the specific sulcus angles.74 Validation studies consistently demonstrate that these automated 
+deep learning and SSM-based algorithms identify these landmarks with remarkable reliability, 
+generally achieving a Mean Absolute Error (MAE) of less than 
+ mm compared to expert 
+human annotations.75 This fully automated feature extraction provides the precise, 
+reproducible angulation vectors (Varus/Valgus, Flexion/Extension, Internal/External rotation) 
+strictly required to program the robotic arm's cutting planes prior to the first incision.79 
+Intraoperative Coordinate Registration and Spatial 
+Transformations 
+The final, critical hurdle in robotic TKA is translating the perfect preoperative digital plan into 
+the physical reality of the operating theater. During surgery, the real-time physical position of 
+the patient's exposed knee must be mathematically locked, or "registered," to the preoperative 
+CT coordinate space. If this registration fails or introduces rotational errors, the robotic 
+end-effector will execute flawless cuts in the wrong physical location.80 
+The Mathematics of Coordinate Spaces 
+The registration process requires harmonizing three distinct spatial domains: 
+1.​ Image Space: The static Cartesian coordinate system of the original CT DICOM data (the 
+ voxel grid containing the virtual surgical plan). 
+2.​ Tracker (World) Space: The dynamic, real-world physical coordinate system governed by 
+the optical tracking cameras (e.g., infrared arrays) mounted in the operating room, which 
+track the reflective fiducial markers rigidly pinned to the patient's femur and tibia. 
+3.​ Robot Base Frame: The localized coordinate system governing the kinematics of the 
+robotic arm and its cutting tool.82 
+The mathematical objective of spatial registration is to find the optimal 
+ homogeneous 
+transformation matrix (
+). This matrix is composed of a 
+ rotation matrix (
+, 
+representing spatial orientation in 
+) and a 
+ translation vector ( , representing 
+displacement in 
+). This single matrix allows any 3D coordinate point in the virtual CT 
+space to be instantly and accurately mapped to the physical location of the patient's anatomy 
+in the Tracker Space.83 
+Point Cloud Generation and the ICP Algorithm 
+Intraoperatively, after the surgical exposure of the joint, the surgeon utilizes a tracked optical 
+probe, or increasingly, a non-invasive handheld structured light laser scanner, to "paint" the 
+exposed cartilaginous and bony surfaces of the distal femur and proximal tibia. This physical 
+scanning process generates a dense intraoperative 3D point cloud.85 
+The core mathematical engine responsible for aligning this intraoperative, real-world point 
+cloud to the preoperative, segmented CT mesh is the Iterative Closest Point (ICP) algorithm.85 
+The standard ICP algorithm iteratively minimizes the Euclidean geometric distance (the error) 
+between the points acquired during surgery and the closest corresponding surface points on 
+the target digital mesh. The objective function is defined as: $$ E(R, t) = \sum_{i=1}^{N} | 
+| R p_i + t - q_i ||^2 $$ where 
+ represents the discrete points from the intraoperative scan, and 
+ represents the mathematically determined closest corresponding points on the highly 
+accurate CT mesh.84 Through successive iterations, utilizing Singular Value Decomposition 
+(SVD) to update the rotation matrix 
+ and translation vector , the algorithm converges, 
+physically locking the two domains together. 
+To prevent the algorithm from converging on an incorrect local minimum—a common failure 
+mode when the initial spatial alignment between the patient and the model is poor—a rigorous 
+coarse-to-fine framework is utilized. The surgeon first performs a coarse registration by 
+manually identifying 3 to 4 distinct anatomical landmarks with the tracked probe (paired-point 
+registration), establishing an initial, rough transformation matrix.89 Following this initialization, 
+the ICP algorithm (or advanced variants such as Semantic ICP, Go-ICP, or Coherent Point Drift) 
+executes the fine registration, autonomously leveraging thousands of captured surface points 
+to achieve an ultra-precise, globally optimal fit.91 Contemporary surface scanning and 
+advanced ICP registration methods routinely attain clinical registration accuracy errors of 
+ 
+mm to 
+ mm. This profound mathematical synchronization effectively eliminates mechanical 
+navigation errors, allowing the robotic arm to execute the surgical plan with unparalleled 
+fidelity.85 
+Clinical Validation Metrics for Sub-Millimeter 
+Accuracy 
+For a complex computational pipeline—encompassing deep learning segmentation, mesh 
+optimization, and point-cloud registration—to be certified for clinical deployment in robotic 
+arthroplasty, its accuracy must be rigorously and unequivocally validated using standardized 
+quantitative metrics. Because the robotic cutting limits (the haptic boundaries) rely entirely on 
+the digital model generated by the segmentation algorithm, surface discrepancies greater than 
+ mm can result in catastrophic clinical outcomes, including cortical notching, severe 
+ligamentous imbalance, implant malrotation, and ultimate prosthetic failure.9 
+The pipeline must be evaluated comprehensively, scrutinizing both overall volumetric overlap 
+and exact boundary spatial distances.94 
+Volumetric Overlap Metrics 
+1.​ Dice Similarity Coefficient (DSC): Also recognized as the F1-score in standard machine 
+learning parlance, the DSC is the harmonic mean of precision and recall. It provides a 
+robust measure of the spatial overlap between the algorithm's predicted volumetric mask 
+(
+) and the manual expert ground truth (
+). It is highly resilient against the 
+massive class imbalance inherent in medical images, scoring from 
+ (no overlap) to 
+ 
+(perfect agreement).47​
+​
+In state-of-the-art architectures evaluated for TKA, such as the CEL-UNet and the 
+self-configuring nnU-Net, DSC scores consistently exceed 
+ for both femoral and 
+tibial bones. Such metrics indicate near-perfect volumetric alignment and the absence of 
+large-scale structural omissions.36 
+2.​ Intersection over Union (IoU / Jaccard Index): The IoU is mathematically related to the 
+DSC but is known to penalize under-segmentation and over-segmentation errors more 
+aggressively.47​
+ 
+Spatial Distance and Surface Metrics 
+While the DSC is a valuable metric for general classification, a neural network could 
+theoretically achieve a highly commendable volumetric DSC while simultaneously failing at the 
+critical bone boundaries (for example, misinterpreting 
+ mm of dense cartilage as cortical 
+bone). Such an error would devastate the intraoperative robotic calibration.45 Therefore, spatial 
+surface metrics are the ultimate, unforgiving arbiter of sub-millimeter clinical viability. 
+1.​ Average Symmetric Surface Distance (ASD / ASSD): The ASD computes the average 
+Euclidean distance between all points on the outer boundary of the algorithm's predicted 
+mesh and the closest corresponding points on the boundary of the ground truth mesh, 
+and vice versa.37​
+​
+Clinical robotic systems typically require an ASD of 
+ mm to be considered reliable 
+for implant sizing. Modern deep learning networks, when paired with appropriate Taubin 
+smoothing, routinely achieve highly accurate ASDs in the range of 
+ to 
+ mm.36 
+2.​ Hausdorff Distance (HD) and HD95: The standard Hausdorff Distance evaluates the 
+absolute maximum distance between the two surfaces—essentially identifying the single 
+worst geometric segmentation error on the entire 3D bone model.47​
+​
+Because the standard HD is exceptionally sensitive to single-voxel outliers (such as 
+random image noise or tiny anatomical anomalies), the 95th percentile Hausdorff 
+Distance (HD95) is universally preferred as a reliable standard in medical imaging.95 By 
+ignoring the top 
+ of extreme outliers, HD95 provides a statistically stable metric 
+representing the maximum expected boundary deviation. An HD95 of 
+ mm is the 
+gold standard threshold; it guarantees that the robotic end-effector will adhere strictly to 
+the intended safe zone during bone resection, ensuring proper kinematic tracking, 
+avoiding ligamentous injury, and securing the long-term survivorship of the implant.40 
+Stringent Evaluation 
+Metric 
+Mathematical / 
+Statistical Focus 
+Direct RTKA Clinical 
+Significance 
+Required Clinical 
+Threshold 
+Dice Coefficient 
+(DSC) 
+Spatial volumetric 
+overlap (
+ score) 
+Ensures overall 
+anatomical 
+consistency and 
+prevents large 
+structural omissions. 
+ 
+Average Surface 
+Distance (ASD) 
+Mean Euclidean 
+surface deviation 
+Correlates directly 
+with the overall 
+seating accuracy and 
+sizing of the primary 
+implants. 
+ mm 
+95th Percentile 
+Hausdorff (HD95) 
+Maximum geometric 
+boundary outlier 
+Prevents localized 
+catastrophic errors 
+(e.g., cortical 
+notching) that 
+compromise haptic 
+walls. 
+ mm 
+Conclusion 
+The successful, widespread deployment of highly advanced robotic systems in Total Knee 
+Arthroplasty is entirely predicated on the ability to translate chaotic, physical human anatomy 
+into a flawless, mathematically pristine digital paradigm. This exhaustive technical framework 
+demonstrates unequivocally that achieving the mandatory sub-millimeter precision relies not 
+on the implementation of a single algorithm, but on the orchestration of a tightly integrated, 
+multi-stage computational pipeline. 
+Initial DICOM preprocessing must rigorously respect the physics of X-ray attenuation through 
+strict HU intensity normalization, artifact suppression, and isotropic B-spline resampling. 
+Subsequently, state-of-the-art segmentation architectures—such as the dynamically adapting 
+nnU-Net, the boundary-focused CEL-UNet, and the context-aware DDA-Transformer—are 
+required to overcome the profound anatomical ambiguities presented by severe osteoarthritis. 
+By employing customized hybrid loss functions that heavily penalize localized edge errors while 
+maintaining global shape awareness, these deep neural networks secure unparalleled surface 
+accuracy. Following the semantic segmentation phase, the geometric transformation of 
+discrete voxels into smooth, topologically robust meshes utilizing the Marching Cubes 33 
+algorithm, Quadric Error Metric decimation, and calibrated Taubin smoothing is crucial for 
+preserving structural integrity without inducing catastrophic volume shrinkage. 
+Ultimately, this high-fidelity virtual model acts as the bedrock for automated mechanical axis 
+calculation and enables seamless intraoperative integration via ICP point-cloud registration. 
+This final synchronization allows for the precise orientation of the kinematic plan and the 
+perfect spatial alignment of the robotic coordinate frame. Validated rigorously against strict 
+distance metrics including the Dice Similarity Coefficient, Average Surface Distance, and the 
+critical 95th Percentile Hausdorff Distance, this comprehensive computational approach 
+reduces manual processing time from hours to mere seconds while consistently guaranteeing 
+surface deviations below the vital 
+ mm threshold. As robotic arthroplasty hardware 
+continues to evolve, the computational methodologies detailed in this comprehensive report 
+represent the indispensable standard for ensuring safe, geometrically accurate, and clinically 
+superior patient outcomes. 
+Works cited 
+1.​ The Trochlear Bisector as a New Landmark for Kinematic Alignment in Total Knee 
+Arthroplasty: A Radiographic Study - MDPI, accessed on March 27, 2026, 
+https://www.mdpi.com/2077-0383/13/12/3548 
+2.​ Mechanical, Anatomical, and Kinematic Axis in TKA: Concepts and Practical 
+Applications, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC4092202/ 
+3.​ Comparative assessment of current robotic-assisted systems in primary total 
+knee arthroplasty - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC9887337/ 
+4.​ Robotics in TKA: state of the art and future perspectives - Joints journal, 
+accessed on March 27, 2026, 
+https://www.jointsjournal.org/wp-content/uploads/sites/9/2025/06/e1523.pdf 
+5.​ A newly custom coordinate system used for preoperative planning of 
+robotic-assisted total knee arthroplasty - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC11605408/ 
+6.​ Combined Edge Loss UNet for Optimized Segmentation in Total Knee 
+Arthroplasty Preoperative Planning - PubMed, accessed on March 27, 2026, 
+https://pubmed.ncbi.nlm.nih.gov/38136024/ 
+7.​ CT Segmentation in Orthopedic Surgery and related techniques - RSIP Vision, 
+accessed on March 27, 2026, 
+https://www.rsipvision.com/ct-segmentation-orthopedic-surgery/ 
+8.​ CEL-Unet: Distance Weighted Maps and Multi-Scale Pyramidal Edge Extraction 
+for Accurate Osteoarthritic Bone Segmentation in CT Scans, accessed on March 
+27, 2026, 
+https://re.public.polimi.it/retrieve/e0c31c12-b5a2-4599-e053-1705fe0aef77/frsip-
+02-857313%20%281%29.pdf 
+9.​ Accuracy of intraoperative bone registration and stereotactic boundary 
+reconstruction during total knee arthroplasty surgery - PubMed, accessed on 
+March 27, 2026, https://pubmed.ncbi.nlm.nih.gov/36088533/ 
+10.​Accuracy Validation in Image-Guided Orthopaedic Surgery, accessed on March 
+27, 2026, 
+https://www.ri.cmu.edu/pub_files/pub2/simon_david_1995_2/simon_david_1995_2.
+pdf 
+11.​Harmonizing the pixel size in retrospective computed tomography radiomics 
+studies | PLOS One - Research journals, accessed on March 27, 2026, 
+https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0178524 
+12.​Normalizing computed tomography data reconstructed with different filter 
+kernels: effect on emphysema quantification - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC4712239/ 
+13.​Hounsfield scale - Wikipedia, accessed on March 27, 2026, 
+https://en.wikipedia.org/wiki/Hounsfield_scale 
+14.​Preprocessing of Pixel Data Information in the DICOM files of the LIDC-IDRI 
+Dataset - Miguel A. Lerma's, accessed on March 27, 2026, 
+https://mlerma54.github.io/papers/lidc-dicom.pdf 
+15.​Hounsfield Units (HU) Explained | CT Numbers & Density Guide - Collective Minds, 
+accessed on March 27, 2026, 
+https://collectiveminds.health/articles/understanding-hounsfield-units-hu-the-co
+mplete-guide-to-ct-numbers-and-density-values 
+16.​Preprocessing of medical images in DICOM format | by Aykhan.py - Medium, 
+accessed on March 27, 2026, 
+https://medium.com/@a.turlasov/preprocessing-of-medical-images-in-dicom-for
+mat-87868e1f2ad9 
+17.​Quick guide on radiology image pre-processing for deep learning applications in 
+prostate cancer research - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC7790158/ 
+18.​Medical Image Preprocessing: Key Techniques & Best Practices - Collective 
+Minds, accessed on March 27, 2026, 
+https://collectiveminds.health/articles/the-ultimate-guide-to-preprocessing-medi
+cal-images-techniques-tools-and-best-practices-for-enhanced-diagnosis 
+19.​Automatic Skeleton Segmentation in CT Images Based on U-Net - PMC, accessed 
+on March 27, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC11522221/ 
+20.​Impact of Preprocessing Parameters in Medical Imaging-Based Radiomic Studies: 
+A Systematic Review - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC11311340/ 
+21.​CT-based machine learning radiomics modeling to screen for lumbar spine 
+osteoporosis, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC12876128/ 
+22.​Understanding coordinate systems and DICOM for deep learning medical image 
+analysis, accessed on March 27, 2026, 
+https://theaisummer.com/medical-image-coordinates/ 
+23.​Deep learning-based segmentation of high-resolution computed tomography 
+image data outperforms commonly used automatic bone segmentation methods 
+| bioRxiv, accessed on March 27, 2026, 
+https://www.biorxiv.org/content/10.1101/2021.07.27.453890.full 
+24.​Context-Aware Mesh Smoothing for Biomedical Applications - Visual Computing, 
+accessed on March 27, 2026, 
+https://vc.cs.ovgu.de/assets/publications/2011/Moench_2011_CG.pdf 
+25.​Distance-Aware Smoothing of Surface Meshes for Surgical Planning - 
+ResearchGate, accessed on March 27, 2026, 
+https://www.researchgate.net/publication/215780882_Distance-Aware_Smoothin
+g_of_Surface_Meshes_for_Surgical_Planning 
+26.​Impact of bone and cartilage segmentation from CT and MRI on both bone 
+forearm osteotomy planning - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC10632286/ 
+27.​Efficient cascaded V‐net optimization for lower extremity CT segmentation 
+validated using bone morphology assessment - PMC, accessed on March 27, 
+2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC9790725/ 
+28.​Isotropic resampling of a CT scan - Beginner Questions - ITK Discourse, accessed 
+on March 27, 2026, 
+https://discourse.itk.org/t/isotropic-resampling-of-a-ct-scan/4160 
+29.​bone thickness measurement: Topics by Science.gov, accessed on March 27, 
+2026, https://www.science.gov/topicpages/b/bone+thickness+measurement 
+30.​Advances in Medical Image Segmentation: A Comprehensive Review of 
+Traditional, Deep Learning and Hybrid Approaches - PMC, accessed on March 27, 
+2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC11505408/ 
+31.​U-Net in Medical Image Segmentation: A Review of Its Applications Across 
+Modalities - arXiv, accessed on March 27, 2026, 
+https://arxiv.org/html/2412.02242v1 
+32.​Automated measurement and grading of knee cartilage thickness: a deep 
+learning-based approach - Frontiers, accessed on March 27, 2026, 
+https://www.frontiersin.org/journals/medicine/articles/10.3389/fmed.2024.1337993
+/full 
+33.​nnU-Net Revisited: A Call for Rigorous Validation in 3D Medical Image 
+Segmentation - arXiv, accessed on March 27, 2026, 
+https://arxiv.org/abs/2404.09556 
+34.​Automatic Multi-view X-ray/CT Registration using Bone Substructure Contours - 
+arXiv, accessed on March 27, 2026, https://arxiv.org/html/2506.13292v1 
+35.​CEL-Unet: Distance Weighted Maps and Multi-Scale Pyramidal Edge Extraction 
+for Accurate Osteoarthritic Bone Segmentation in CT Scans - Frontiers, accessed 
+on March 27, 2026, 
+https://www.frontiersin.org/journals/signal-processing/articles/10.3389/frsip.2022.
+857313/full 
+36.​Knee Bone and Cartilage Segmentation Based on a 3D Deep Neural Network 
+Using Adversarial Loss for Prior Shape Constraint - Frontiers, accessed on March 
+27, 2026, 
+https://www.frontiersin.org/journals/medicine/articles/10.3389/fmed.2022.792900/
+full 
+37.​nnU-Net for the Automatic Knee Segmentation from CT Images - EasyChair, 
+accessed on March 27, 2026, 
+https://easychair.org/publications/paper/t1Gr/download 
+38.​nnU-Net Revisited: A Call for Rigorous Validation in 3D Medical Image 
+Segmentation - arXiv, accessed on March 27, 2026, 
+https://arxiv.org/html/2404.09556v2 
+39.​Combined Edge Loss UNet for Optimized Segmentation in Total Knee 
+Arthroplasty Preoperative Planning - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC10740423/ 
+40.​Combined Edge Loss UNet for Optimized Segmentation in Total Knee 
+Arthroplasty Preoperative Planning - ResearchGate, accessed on March 27, 2026, 
+https://www.researchgate.net/publication/376609133_Combined_Edge_Loss_UNe
+t_for_Optimized_Segmentation_in_Total_Knee_Arthroplasty_Preoperative_Plannin
+g 
+41.​Development and clinical validation of a deep learning-based knee CT image 
+segmentation method for robotic-assisted total knee arthroplasty - PubMed, 
+accessed on March 27, 2026, https://pubmed.ncbi.nlm.nih.gov/38994900/ 
+42.​Artificial Intelligence and Orthopaedic Prosthetic Planning: A State-of-the-Art 
+Review and Evolving Liability Perspectives - MDPI, accessed on March 27, 2026, 
+https://www.mdpi.com/2413-4155/8/2/27 
+43.​Computed Tomography-Based Robotics Are More Accurate than Manual 
+Instruments in Achieving Sagittal Alignment Targets in Total Knee Arthroplasty - 
+PubMed, accessed on March 27, 2026, 
+https://pubmed.ncbi.nlm.nih.gov/39956488/ 
+44.​Adaptive Region-Specific Loss for Improved Medical Image Segmentation - PMC, 
+accessed on March 27, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC11346301/ 
+45.​InverseForm: A Loss Function for Structured Boundary-Aware Segmentation - 
+CVF Open Access, accessed on March 27, 2026, 
+https://openaccess.thecvf.com/content/CVPR2021/papers/Borse_InverseForm_A_
+Loss_Function_for_Structured_Boundary-Aware_Segmentation_CVPR_2021_pap
+er.pdf 
+46.​A Comparison of CNN Models for Automated Femur Segmentation Based on 
+DICOM Images | Request PDF - ResearchGate, accessed on March 27, 2026, 
+https://www.researchgate.net/publication/375818188_A_Comparison_of_CNN_Mo
+dels_for_Automated_Femur_Segmentation_Based_on_DICOM_Images 
+47.​Understanding Evaluation Metrics in Medical Image Segmentation | by Nghi 
+Huynh | Mastering Data Science | Medium, accessed on March 27, 2026, 
+https://medium.com/mastering-data-science/understanding-evaluation-metrics-i
+n-medical-image-segmentation-d289a373a3f 
+48.​combined focal loss and dice loss function improves the segmentation of 
+beta-sheets in medium-resolution cryo-electron-microscopy density maps | 
+Bioinformatics Advances | Oxford Academic, accessed on March 27, 2026, 
+https://academic.oup.com/bioinformaticsadvances/article/4/1/vbae169/7907198 
+49.​A survey of loss functions for semantic segmentation - arXiv, accessed on March 
+27, 2026, https://arxiv.org/pdf/2006.14822 
+50.​Boundary Loss-Based 2.5D Fully Convolutional Neural Networks Approach for 
+Segmentation: A Case Study of the Liver and Tumor on Computed Tomography - 
+MDPI, accessed on March 27, 2026, https://www.mdpi.com/1999-4893/14/5/144 
+51.​A mutual inclusion mechanism for precise boundary segmentation in medical 
+images, accessed on March 27, 2026, 
+https://www.frontiersin.org/journals/bioengineering-and-biotechnology/articles/1
+0.3389/fbioe.2024.1504249/full 
+52.​Knee Bone and Cartilage Segmentation Based on a 3D Deep Neural Network 
+Using Adversarial Loss for Prior Shape Constraint - ResearchGate, accessed on 
+March 27, 2026, 
+https://www.researchgate.net/publication/360765268_Knee_Bone_and_Cartilage_
+Segmentation_Based_on_a_3D_Deep_Neural_Network_Using_Adversarial_Loss_f
+or_Prior_Shape_Constraint 
+53.​Marching Cubes 33: Construction of Topologically Correct Isosurfaces, accessed 
+on March 27, 2026, 
+https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Chernyaev96.pdf 
+54.​Marching cubes - Wikipedia, accessed on March 27, 2026, 
+https://en.wikipedia.org/wiki/Marching_cubes 
+55.​Effects of Different Parameter Settings for 3D Data Smoothing and Mesh 
+Simplification on Near Real-Time 3D Reconstruction of High Resolution 
+Bioceramic Bone Void Filling Medical Images - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8659505/ 
+56.​Effects of Different Parameter Settings for 3D Data Smoothing and Mesh 
+Simplification on Near Real-Time 3D Reconstruction of High Resolution 
+Bioceramic Bone Void Filling Medical Images - MDPI, accessed on March 27, 2026, 
+https://www.mdpi.com/1424-8220/21/23/7955 
+57.​Critical Review: A Comparison of Mesh Simplification Algorithms, accessed on 
+March 27, 2026, 
+https://ciis.lcsr.jhu.edu/lib/exe/fetch.php?media=courses:446:2016:446-2016-16:or
+tega_seminar_paper.pdf 
+58.​Comparative Study of 3D Reconstruction Methods for Medical Imaging - CAD 
+Journal, accessed on March 27, 2026, 
+https://cad-journal.net/files/vol_19/CAD_19(5)_2022_1000-1014.pdf 
+59.​Multi-Material Mesh Representation of Anatomical Structures for Deep Brain 
+Stimulation Planning - ODU Digital Commons, accessed on March 27, 2026, 
+https://digitalcommons.odu.edu/context/msve_etds/article/1010/viewcontent/Ras
+hid_multi_material.pdf 
+60.​Surface Simplification Using Quadric Error Metrics - Carnegie Mellon University, 
+accessed on March 27, 2026, 
+https://www.cs.cmu.edu/~garland/Papers/quadrics.pdf 
+61.​CVPR Poster Feature-Preserving Mesh Decimation for Normal Integration, 
+accessed on March 27, 2026, https://cvpr.thecvf.com/virtual/2025/poster/34800 
+62.​New quadric metric for simplifying meshes with appearance attributes - Hugues 
+Hoppe, accessed on March 27, 2026, https://hhoppe.com/newqem.pdf 
+63.​How to Decimate Mesh in MeshLab vs. MeshLib, accessed on March 27, 2026, 
+https://meshlib.io/blog/meshlb-vs-meshlab-mesh-simplification/ 
+64.​A Hybrid Method for 3D Reconstruction of MR Images - PMC - NIH, accessed on 
+March 27, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC9029689/ 
+65.​Algorithms used in medical image segmentation for 3D printing and how to 
+understand and quantify their performance - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC9229760/ 
+66.​Laplacian vs. Taubin smoothing. FIR Filters based on the linear... - ResearchGate, 
+accessed on March 27, 2026, 
+https://www.researchgate.net/figure/Laplacian-vs-Taubin-smoothing-FIR-Filters-
+based-on-the-linear-isotropic-Laplacian_fig4_228957417 
+67.​Ensuring anatomical integrity and shared contact surfaces in vertebra and disc 
+models: a segmentation-based smoothing approach - Taylor & Francis, accessed 
+on March 27, 2026, 
+https://www.tandfonline.com/doi/full/10.1080/10255842.2025.2473523 
+68.​Effects of Different Parameter Settings for 3D Data Smoothing and Mesh 
+Simplification on Near Real-Time 3D Reconstruction of High Resolution 
+Bioceramic Bone Void Filling Medical Images - Semantic Scholar, accessed on 
+March 27, 2026, 
+https://www.semanticscholar.org/paper/Effects-of-Different-Parameter-Settings-
+for-3D-Data-Chin-Mohamed/02d950412116517437136e88ebee81f1e813d3b6 
+69.​Accuracy assessment of 3D bone reconstructions using CT: an intro comparison | 
+Request PDF - ResearchGate, accessed on March 27, 2026, 
+https://www.researchgate.net/publication/277783131_Accuracy_assessment_of_3
+D_bone_reconstructions_using_CT_an_intro_comparison 
+70.​Radiological assessment of lower limb alignment - PMC - NIH, accessed on March 
+27, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC8246117/ 
+71.​Automatic Assessment of Lower-Limb Alignment from Computed Tomography - 
+JBJS, accessed on March 27, 2026, 
+https://www.jbjs.org/reader.php?rsuite_id=59f0a28d-49ce-4927-9c7f-0e4fa86a11
+fe 
+72.​THE MEASUREMENT AND ANALYSIS OF AXIAL DEFORMITY AT THE KNEE - LSU 
+School of Medicine, accessed on March 27, 2026, 
+https://www.medschool.lsuhsc.edu/ortho/docs/How%20to%20Measure%20Knee
+%20Alignment.pdf 
+73.​Lower Limb Alignment | Radiology Key, accessed on March 27, 2026, 
+https://radiologykey.com/lower-limb-alignment/ 
+74.​mako-tka-surgical-technique.pdf, accessed on March 27, 2026, 
+https://www.tekno-surgical.com/uploads/mako-tka-surgical-technique.pdf 
+75.​Automated Landmark Annotation for Morphometric Analysis of Distal Femur and 
+Proximal Tibia - MDPI, accessed on March 27, 2026, 
+https://www.mdpi.com/2313-433X/10/4/90 
+76.​Deep Learning for Automated Measurement of Patellofemoral Anatomic 
+Landmarks - MDPI, accessed on March 27, 2026, 
+https://www.mdpi.com/2306-5354/10/7/815 
+77.​Fully automated workflow for designing patient-specific orthopaedic implants: 
+Application to total knee arthroplasty - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC12193079/ 
+78.​Robotic Systems in Knee Surgery: Current Concepts and Future Perspectives - 
+MDPI, accessed on March 27, 2026, https://www.mdpi.com/2673-1592/5/4/86 
+79.​A newly custom coordinate system used for preoperative planning of 
+robotic-assisted total knee arthroplasty - PubMed, accessed on March 27, 2026, 
+https://pubmed.ncbi.nlm.nih.gov/39619583/ 
+80.​An Image-Based Augmented Reality System for Achieving Accurate Bone 
+Resection in Total Knee Arthroplasty - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC11094513/ 
+81.​6.1. Registration Intro — MPHY0026 documentation, accessed on March 27, 2026, 
+https://mphy0026.readthedocs.io/en/latest/registration/intro.html 
+82.​A Rapid Coordinate Transformation Method Applied in Industrial Robot 
+Calibration Based on Characteristic Line Coincidence - MDPI, accessed on March 
+27, 2026, https://www.mdpi.com/1424-8220/16/2/239 
+83.​Coordinate Transformations in Robotics - MATLAB & Simulink - MathWorks, 
+accessed on March 27, 2026, 
+https://www.mathworks.com/help/robotics/ug/coordinate-transformations-in-rob
+otics.html 
+84.​A Surface-Matching Technique for Robot-Assisted Registration, accessed on 
+March 27, 2026, 
+https://www.tandfonline.com/doi/pdf/10.3109/10929080109146091 
+85.​Report on a novel bone registration method: A rapid, accurate, and radiation-free 
+technique for computer- and robotic-assisted orthopedic surgeries - PMC, 
+accessed on March 27, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC7873346/ 
+86.​Registration of Knee Articulating Surface Utilizing a Portable Handheld Laser 
+Scanner: A Cadaveric Study | Published in Journal of Orthopaedic Experience & 
+Innovation, accessed on March 27, 2026, 
+https://journaloei.scholasticahq.com/article/87400-registration-of-knee-articulati
+ng-surface-utilizing-a-portable-handheld-laser-scanner-a-cadaveric-study 
+87.​Robotic-Assisted Knee Arthroplasty (RAKA): The Technique, the Technology and 
+the Transition - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC7572961/ 
+88.​Rigid Point-Surface Registration Using an EM Variant of ICP for Computer Guided 
+Oral Implantology - Inria, accessed on March 27, 2026, 
+https://www-sop.inria.fr/asclepios/Publications/Xavier.Pennec/Granger.Pennec.MI
+CCAI01.pdf 
+89.​Robotic Systems and Navigation Techniques in Orthopedics: A Historical Review - 
+MDPI, accessed on March 27, 2026, https://www.mdpi.com/2076-3417/13/17/9768 
+90.​Improved Surface-Based Registration of CT and Intraoperative 3D Ultrasound of 
+Bones, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC6008887/ 
+91.​Semantic-ICP: Iterative Closest Point for Non-rigid Multi-Organ Point Cloud 
+Registration, accessed on March 27, 2026, https://arxiv.org/html/2503.00972v3 
+92.​Determination and quantitative evaluation of image-based registration accuracy 
+for robotic neurosurgery - University of Birmingham, accessed on March 27, 2026, 
+https://etheses.bham.ac.uk/id/eprint/8520/1/Cutter18PhD.pdf 
+93.​A novel bone registration method using impression molding and structured-light 
+3D scanning technology - PubMed, accessed on March 27, 2026, 
+https://pubmed.ncbi.nlm.nih.gov/35119122/ 
+94.​3D Medical Image Segmentation with 3D Modelling - PMC, accessed on March 27, 
+2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC12938002/ 
+95.​Family of boundary overlap metrics for the evaluation of medical image 
+segmentation | Request PDF - ResearchGate, accessed on March 27, 2026, 
+https://www.researchgate.net/publication/323266836_Family_of_boundary_overla
+p_metrics_for_the_evaluation_of_medical_image_segmentation 
+96.​Deep learning-based approach for 3D bone segmentation and prediction of 
+missing tooth region for dental implant planning - PMC, accessed on March 27, 
+2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC11180661/ 
+97.​A prospective randomised control trial comparing functional with mechanical axis 
+alignment in total knee arthroplasty - PMC, accessed on March 27, 2026, 
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8351154/ 
