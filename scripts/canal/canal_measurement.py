@@ -7,46 +7,57 @@ from skimage.morphology import skeletonize
 from scipy.ndimage import distance_transform_edt, binary_erosion, label
 from config import DATA, HU_CANAL_MIN, HU_CANAL_MAX
 
-def calculate_canal_parameters(bone_mask, ct_data, spacing):
+def calculate_canal_parameters(bone_mask, ct_data, spacing, z_offset=0, is_mr=False):
     """
-    Extract medullary canal parameters from a bone mask and CT intensities.
-    Refined with Shaft-Only constraints for full-leg CT accuracy.
+    Extract medullary canal parameters from a bone mask and CT/MR intensities.
+    Refined with Shaft-Only constraints for full-leg clinical accuracy.
     """
     # 1. Bounding box cropping to save memory
     coords = np.argwhere(bone_mask)
     if coords.size == 0:
         return None
     
-    z_min, y_min, x_min = coords.min(0)
-    z_max, y_max, x_max = coords.max(0)
+    x_min, y_min, z_min = coords.min(0)
+    x_max, y_max, z_max = coords.max(0)
     
     pad = 5
-    z_min = max(0, z_min - pad); y_min = max(0, y_min - pad); x_min = max(0, x_min - pad)
-    z_max = min(bone_mask.shape[0], z_max + pad)
+    x_min = max(0, x_min - pad); y_min = max(0, y_min - pad); z_min = max(0, z_min - pad)
+    x_max = min(bone_mask.shape[0], x_max + pad)
     y_max = min(bone_mask.shape[1], y_max + pad)
-    x_max = min(bone_mask.shape[2], x_max + pad)
+    z_max = min(bone_mask.shape[2], z_max + pad)
     
-    cropped_mask = bone_mask[z_min:z_max, y_min:y_max, x_min:x_max]
-    cropped_ct = ct_data[z_min:z_max, y_min:y_max, x_min:x_max]
+    cropped_mask = bone_mask[x_min:x_max, y_min:y_max, z_min:z_max]
+    cropped_ct = ct_data[x_min:x_max, y_min:y_max, z_min:z_max]
     
     # 2. Isolate potential canal space
-    canal_mask = (cropped_mask > 0) & (cropped_ct >= HU_CANAL_MIN) & (cropped_ct <= HU_CANAL_MAX)
+    if is_mr:
+        # MRI Approach: Use Intensity Percentile within Bone (Marrow is usually hyperintense)
+        # We also apply a small erosion to ensure we are truly inside the cortical shell
+        bone_core = binary_erosion(cropped_mask, iterations=2)
+        if np.any(bone_core):
+            intensities = cropped_ct[bone_core > 0]
+            # Heuristic: Canal/Marrow is in the top 40% of intensities inside the bone
+            thresh = np.percentile(intensities, 60)
+            canal_mask = (bone_core > 0) & (cropped_ct >= thresh)
+        else:
+            canal_mask = cropped_mask > 0
+    else:
+        # CT Approach: HU-based windowing
+        canal_mask = (cropped_mask > 0) & (cropped_ct >= HU_CANAL_MIN) & (cropped_ct <= HU_CANAL_MAX)
     
     # NEW: Shaft-Only Constraint (Ignore hip/pelvis and knee flares)
-    # Filter by vertical percentile (25% to 75% of bone height)
-    z_voxels = np.argwhere(cropped_mask)[:, 0]
+    z_voxels = np.argwhere(cropped_mask)[:, 2]
+    if z_voxels.size == 0: return None
     z_start = np.percentile(z_voxels, 25)
     z_end = np.percentile(z_voxels, 75)
     
     shaft_mask = np.zeros_like(canal_mask)
-    shaft_mask[int(z_start):int(z_end), :, :] = 1
+    shaft_mask[:, :, int(z_start):int(z_end)] = 1
     canal_mask = canal_mask & shaft_mask
     
     # NEW: Vertical Continuity (Largest Connected Component)
-    # Removes scattered noise in cancellous bone regions
     lbl_canal, num_lbls = label(canal_mask)
     if num_lbls > 0:
-        # Keep only the largest structure (the main canal)
         bincount = np.bincount(lbl_canal.ravel())
         if len(bincount) > 1:
             main_label = np.argmax(bincount[1:]) + 1
@@ -74,24 +85,25 @@ def calculate_canal_parameters(bone_mask, ct_data, spacing):
     max_diameter = np.max(diameters)
     
     skel_coords = np.argwhere(skeleton_cropped)
-    z_len = (np.max(skel_coords[:, 0]) - np.min(skel_coords[:, 0])) * spacing[0]
+    z_len = (np.max(skel_coords[:, 2]) - np.min(skel_coords[:, 2])) * spacing[2]
     
     # 6. Map back
     skeleton_full = np.zeros_like(bone_mask, dtype=np.uint8)
-    skeleton_full[z_min:z_max, y_min:y_max, x_min:x_max] = skeleton_cropped.astype(np.uint8)
+    skeleton_full[x_min:x_max, y_min:y_max, z_min:z_max] = skeleton_cropped.astype(np.uint8)
     
     return {
         "avg_diameter": avg_diameter,
         "isthmus_diameter": isthmus_diameter,
         "max_diameter": max_diameter,
         "length_mm": z_len,
-        "skeleton": skeleton_full
+        "skeleton": skeleton_full,
+        "z_min_orig": z_min + z_offset
     }
 
-def process_patient_canal(patient_name):
-    print(f"\n--- Medullary Canal Analysis: {patient_name} ---")
+def process_patient_canal(patient_name, is_mr=False):
+    print(f"\n--- Medullary Canal Analysis: {patient_name} (Mode: {'MRI' if is_mr else 'CT'}) ---")
     
-    # Load CT (PREPPED)
+    # Load CT/MR (PREPPED)
     ct_path = DATA / "NIfTI" / f"{patient_name}_prepped.nii.gz"
     if not ct_path.exists():
         ct_path = DATA / "NIfTI" / f"{patient_name}_raw.nii.gz"
@@ -115,70 +127,73 @@ def process_patient_canal(patient_name):
         return
         
     ct_img = nib.load(str(ct_path))
-    ct_data = ct_img.get_fdata()
     spacing = ct_img.header.get_zooms()
+    seg_img = nib.load(str(seg_path))
     
-    # [OPTIMIZATION] Avoid loading 9GB float64 array with get_fdata()
-    # Use ArrayProxy (dataobj) to slice and threshold simultaneously
-    print(f"    Scanning volume for canal identification (Memory-Safe)...")
+    # MEMORY-EFFICIENT LABEL CHECK
+    print(f"    Scanning segmentation for canal identification (Memory-Efficient)...")
+    seg_proxy = seg_img.dataobj
+    sample_stride = 5 
+    sample_data = np.asarray(seg_proxy[::sample_stride, ::sample_stride, ::sample_stride])
+    present_labels = np.unique(sample_data)
     
-    # Label IDs (from config or typical TotalSeg)
-    femur_labels = [76, 75, 44, 25, 24]
-    tibia_labels = [46, 45, 27, 26]
+    femur_labels = [76, 75, 44, 25, 24, 94, 93]
+    tibia_labels = [46, 45, 4, 3, 27, 26]
     
     for bone_name, target_labels in [("femur", femur_labels), ("tibia", tibia_labels)]:
         print(f"Checking {bone_name}...")
-        bone_id = next((l for l in target_labels if l in np.unique(seg_data)), None)
+        bone_id = next((l for l in target_labels if l in present_labels), None)
         
         mask = None
+        bone_slice = None 
+        minz = 0
+        
         if bone_id:
-            # Sliced access for AI segment
-            mask = (np.asarray(seg_img.dataobj) == bone_id).astype(np.uint8)
+            print(f"  Found Bone Label ID: {bone_id} for {bone_name}. Loading mask...")
+            mask = (np.asarray(seg_proxy) == bone_id).astype(np.uint8)
             voxel_volume = np.prod(spacing) / 1000.0 # in cc
             bone_vol_cc = np.sum(mask) * voxel_volume
             
-            if bone_vol_cc < 500: # Threshold for a typical adult femur/tibia
+            if bone_vol_cc < 100: 
                 print(f"  Warning: AI segment for {bone_name} is too small ({bone_vol_cc:.1f}cc).")
                 mask = None
         
-        if mask is None:
+        if mask is None and not is_mr:
+            from skimage import measure
             print(f"  [CANAL FALLBACK] Applying Anatomical Z-Sorting for {bone_name}...")
-            # Identifiy components in a 2x lower-res space directly from disk
+            raw_ct_path = DATA / "NIfTI" / f"{patient_name}_raw.nii.gz"
+            fallback_img = nib.load(str(raw_ct_path)) if raw_ct_path.exists() else ct_img
+                
             ds = 2
-            mask_ds = (np.asarray(img.dataobj[::ds, ::ds, ::ds]) > 250).astype(np.uint8)
+            mask_ds = (np.asarray(fallback_img.dataobj[::ds, ::ds, ::ds]) > 250).astype(np.uint8)
             lbls_ds = measure.label(mask_ds)
             props = measure.regionprops(lbls_ds)
             
-            # Filter and sort by Z-centroid (Vertical position)
             bone_props = [p for p in props if p.area > 5000]
-            bone_props.sort(key=lambda x: x.centroid[2], reverse=True) # Top to Bottom (Z-axis)
+            bone_props.sort(key=lambda x: x.centroid[2], reverse=True) # Top to Bottom
             
             if len(bone_props) < 2:
                 print(f"    Error: Found only {len(bone_props)} bone structures. Need at least 2.")
                 mask = None
             else:
-                # Heuristic: [Pelvis, Femur, Tibia] or [Femur, Tibia]
                 if bone_name == "femur":
                     targetp = bone_props[0] if len(bone_props) == 2 else bone_props[1]
                 else: # tibia
                     targetp = bone_props[-1]
                 
                 print(f"    Selected component at Z-centroid {targetp.centroid[2] * ds:.1f} for {bone_name} canal.")
+                minx, miny, minz, maxx, maxy, maxz = targetp.bbox
+                minx, miny, minz = minx*ds, miny*ds, minz*ds
+                maxx, maxy, maxz = maxx*ds, maxy*ds, maxz*ds
                 
-                # Crop subvolume for high-res canal analysis
-                minr, minc, minz, maxr, maxc, maxz = targetp.bbox
-                minr, minc, minz = minr*ds, minc*ds, minz*ds
-                maxr, maxc, maxz = maxr*ds, maxc*ds, maxz*ds
-                
-                # Load only the bone region sub-volume
-                sub_vol_data = np.asarray(img.dataobj[minr:maxr, minc:maxc, minz:maxz])
+                sub_vol_data = np.asarray(ct_img.dataobj[minx:maxx, miny:maxy, minz:maxz])
                 mask = (sub_vol_data > 250).astype(np.uint8)
-                bone_slice = sub_vol_data # Use for canal density
+                bone_slice = sub_vol_data 
             
         if mask is not None:
-            z_offset = minz if 'minz' in locals() else 0
-            # Pass only the sub-volume to calculate_canal_parameters
-            stats = calculate_canal_parameters(mask, bone_slice if 'bone_slice' in locals() else img.dataobj, spacing, z_offset=z_offset)
+            z_offset = minz
+            final_bone_slice = bone_slice if bone_slice is not None else np.asarray(ct_img.dataobj)
+            stats = calculate_canal_parameters(mask, final_bone_slice, spacing, z_offset=z_offset, is_mr=is_mr)
             
             if stats:
                 print(f"  {bone_name.upper()} CANAL DETECTED")
@@ -186,13 +201,11 @@ def process_patient_canal(patient_name):
                 print(f"  - Avg Diam: {stats['avg_diameter']:.2f} mm")
                 print(f"  - Isthmus:  {stats['isthmus_diameter']:.2f} mm")
                 
-                # Save skeleton for visualization
                 out_dir = DATA / "canal" / patient_name
                 os.makedirs(out_dir, exist_ok=True)
                 skel_img = nib.Nifti1Image(stats['skeleton'], ct_img.affine)
                 nib.save(skel_img, out_dir / f"{bone_name}_skeleton.nii.gz")
                 
-                # Write simple text report
                 with open(out_dir / f"{bone_name}_report.txt", "w") as f:
                     f.write(f"Bone: {bone_name}\n")
                     f.write(f"Length: {stats['length_mm']:.2f} mm\n")
@@ -205,5 +218,6 @@ def process_patient_canal(patient_name):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", type=str, required=True)
+    parser.add_argument("--mr", action="store_true", help="Process as MRI (disables HU thresholds)")
     args = parser.parse_args()
-    process_patient_canal(args.name)
+    process_patient_canal(args.name, is_mr=args.mr)
