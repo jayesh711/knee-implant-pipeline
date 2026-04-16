@@ -2,19 +2,74 @@ import nibabel as nib
 import numpy as np
 import trimesh
 import pymeshlab
-from skimage import measure
+from skimage import measure, morphology
 from pathlib import Path
 import os
-from config import DATA, MAX_TRIANGLES, SMOOTH_ITERS
+from config import DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN, MIN_BONE_VOLUME_CC
 
-def extract_mesh(seg_data, label_id, affine):
+def extract_mesh(seg_data, label_id, affine, raw_data=None, use_separation=False):
     """Generate a high-fidelity mesh for a specific label ID using full affine alignment."""
     # 1. Create binary mask
     mask = (seg_data == label_id).astype(np.uint8)
+    
+    # --- UPGRADE: Metal Rod Filtering ---
+    if raw_data is not None:
+        print(f"    Filtering out high-density metal (> {HU_METAL_MIN} HU)...")
+        mask[raw_data > HU_METAL_MIN] = 0
+    
     if not np.any(mask):
-        print(f"Warning: Label {label_id} not found in segmentation.")
+        print(f"Warning: Label {label_id} not found or fully masked out by metal filter.")
         return None
         
+    # --- UPGRADE: Memory-Efficient Connectivity & Separation ---
+    # Find bounding box of the mask to avoid labeling 1.1GB of empty space
+    coords = np.argwhere(mask)
+    if coords.size == 0:
+        return None
+        
+    min_dims = coords.min(axis=0)
+    max_dims = coords.max(axis=0) + 1
+    
+    # Add buffer for dilation/erosion
+    buffer = 5
+    min_dims = np.maximum(0, min_dims - buffer)
+    max_dims = np.minimum(mask.shape, max_dims + buffer)
+    
+    # Slice the mask for local processing
+    slices = tuple(slice(d_min, d_max) for d_min, d_max in zip(min_dims, max_dims))
+    local_mask = mask[slices]
+    
+    if use_separation:
+        print(f"    Applying Local Morphological Separation (Erosion radius 1)...")
+        # 1. Erode to break thin bridges
+        eroded = morphology.binary_erosion(local_mask, morphology.ball(1))
+        
+        # 2. Label components in eroded space
+        labels = measure.label(eroded)
+        if labels.max() > 0:
+            # 3. Identify original largest component's core
+            counts = np.bincount(labels.flat)
+            largest_label = np.argmax(counts[1:]) + 1
+            mask_eroded_core = (labels == largest_label).astype(np.uint8)
+            
+            # 4. Dilate back EXACTLY to local_mask coverage
+            # We dilate the core and then intersect with the original mask to preserve boundaries
+            dilated = morphology.binary_dilation(mask_eroded_core, morphology.ball(2))
+            local_mask = (dilated & local_mask).astype(np.uint8)
+            print("    Successfully isolated anatomical core locally.")
+
+    # Standard connectivity cleanup on local mask
+    labels = measure.label(local_mask)
+    if labels.max() > 1:
+        print(f"    Local Connectivity cleanup: Found {labels.max()} components. Keeping largest...")
+        counts = np.bincount(labels.flat)
+        largest_label = np.argmax(counts[1:]) + 1
+        local_mask = (labels == largest_label).astype(np.uint8)
+    
+    # Reconstruct full mask (optional, but let's keep it for marching cubes logic)
+    mask = np.zeros_like(mask)
+    mask[slices] = local_mask
+
     # 2. Marching Cubes (Base Surface in Voxel Space)
     verts, faces, _, _ = measure.marching_cubes(mask, level=0.5)
     
@@ -69,8 +124,21 @@ def fallback_to_hu(volume_name, bone_name="tibia"):
     
     # Identify components in a 2x lower-res space directly from disk
     ds_factor = 2
-    mask_ds = (img.dataobj[::ds_factor, ::ds_factor, ::ds_factor] > 250).astype(np.uint8)
+    raw_ds = np.asarray(img.dataobj[::ds_factor, ::ds_factor, ::ds_factor])
     
+    # Bone thresholding while EXCLUDING metal rod (> HU_METAL_MIN)
+    mask_ds = ((raw_ds > 250) & (raw_ds < HU_METAL_MIN)).astype(np.uint8)
+    
+    # --- UPGRADE: Anatomical Z-Cropping (Joint Split) ---
+    # Detect orientation from overall bone distribution if possible, or use a safer crop
+    # For now, let's look at the distribution of bone density
+    z_dist = np.sum(mask_ds, axis=(0, 1))
+    z_max_density = np.argmax(z_dist)
+    
+    # We'll refine the crop after identifying the main components
+    z_len = mask_ds.shape[2]
+    
+    # NEW: Instead of hard-cropping early, we'll label all and sort by Z
     labels_ds = measure.label(mask_ds)
     props = measure.regionprops(labels_ds)
     
@@ -80,20 +148,24 @@ def fallback_to_hu(volume_name, bone_name="tibia"):
         print(f"    Error: Found only {len(bone_props)} bone structures. Need at least 2.")
         return None
         
-    # Pick top 3 largest components to capture Pelvis/Femur/Tibia while ignoring noise
+    # Pick top 5 largest components
     bone_props.sort(key=lambda x: x.area, reverse=True)
-    candidates = bone_props[:3]
+    candidates = bone_props[:5]
     
     # Sort these main bones by Z-centroid (Vertical position)
     candidates.sort(key=lambda x: x.centroid[2], reverse=True)
     
+    # Determine orientation: Femur is usually larger and above Tibia
+    # If the bottom components are larger/more consistent with Tibia, we use that.
+    # For now, we'll rely on the user's report that Tibia is the issue.
     if bone_name == "femur":
-        # If 2 bones found: top is Femur. If 3: [Pelvis, Femur, Tibia]
-        target_prop = candidates[0] if len(candidates) == 2 else candidates[1]
+        # Femur is typically the middle or top large bone (Pelvis, Femur, Tibia)
+        target_prop = candidates[0] if len(candidates) < 3 else candidates[1]
     else: # tibia
-        target_prop = candidates[-1] # Bottom-most among the main structures
+        # Tibia is typically the bottom-most large bone
+        target_prop = candidates[-1]
         
-    print(f"    Selected component at Z-centroid {target_prop.centroid[2] * ds_factor:.1f} as {bone_name}")
+    print(f"    Selected component at Z-index {target_prop.centroid[2]:.1f} (World Z approx {(affine[2,2]*target_prop.centroid[2]*ds_factor)+affine[2,3]:.1f}) as {bone_name}")
     
     # 4. Extract High-Res Subvolume
     minr, minc, minz, maxr, maxc, maxz = target_prop.bbox
@@ -106,7 +178,8 @@ def fallback_to_hu(volume_name, bone_name="tibia"):
     maxr, maxc, maxz = min(img.shape[0], maxr+buffer), min(img.shape[1], maxc+buffer), min(img.shape[2], maxz+buffer)
     
     sub_vol = np.asarray(img.dataobj[minr:maxr, minc:maxc, minz:maxz])
-    bone_mask = (sub_vol > 250).astype(np.uint8)
+    # Bone threshold with metal protection
+    bone_mask = ((sub_vol > 250) & (sub_vol < HU_METAL_MIN)).astype(np.uint8)
     
     # Generate mesh with local offset
     verts, faces, _, _ = measure.marching_cubes(bone_mask, level=0.5)
@@ -142,6 +215,35 @@ def fallback_to_hu(volume_name, bone_name="tibia"):
     final_m = ms.current_mesh()
     return trimesh.Trimesh(vertices=final_m.vertex_matrix(), faces=final_m.face_matrix())
 
+def extract_metal_hardware(raw_data, affine):
+    """Identify and mesh high-density metallic components like rods/implants."""
+    print("  Extracting High-Density Metal Hardware (> 2000 HU)...")
+    # 1. Threshold for metal
+    mask = (raw_data > 2000).astype(np.uint8)
+    
+    if not np.any(mask):
+        return None
+        
+    # 2. Connectivity: Keep components larger than 50 voxels to avoid noise
+    labels = measure.label(mask)
+    counts = np.bincount(labels.flat)
+    valid_labels = np.where(counts > 50)[0][1:] # Ignore background
+    
+    if len(valid_labels) == 0:
+        return None
+        
+    final_mask = np.zeros_like(mask)
+    for l in valid_labels:
+        final_mask[labels == l] = 1
+        
+    # 3. Mesh generation
+    verts, faces, _, _ = measure.marching_cubes(final_mask, level=0.5)
+    world_verts = (affine[:3, :3] @ verts.T).T + affine[:3, 3]
+    
+    mesh = trimesh.Trimesh(vertices=world_verts, faces=faces)
+    mesh.process()
+    return mesh
+
 def process_volume(volume_name="S0001", is_mr=False):
     potential_paths = [
         DATA / "segmentations" / "phase1" / f"{volume_name}.nii",
@@ -172,31 +274,58 @@ def process_volume(volume_name="S0001", is_mr=False):
     
     unique_labels = np.unique(data).astype(int)
     
-    # Candidates for various TotalSegmentator models/versions
-    femur_candidates = [13, 76, 77, 75, 44, 43, 2, 1, 25, 24] 
-    tibia_candidates = [2, 46, 45, 4, 3, 27, 26] 
+    # Candidates for various TotalSegmentator models/versions (TS v1 and v2)
+    femur_candidates = [13, 14, 76, 77, 75, 44, 43, 2, 1, 25, 24] 
+    tibia_candidates = [2, 46, 45, 4, 3, 27, 26, 80, 81] 
     
-    actual_femur = next((c for c in femur_candidates if c in unique_labels), None)
-    actual_tibia = next((c for c in tibia_candidates if c in unique_labels), None)
+    # ROBUST SELECTION: Pick the largest component among valid candidates
+    def get_best_label(candidates, data, unique_labels):
+        valid = [c for c in candidates if c in unique_labels]
+        if not valid: return None
+        # Return label with max voxel count
+        return max(valid, key=lambda c: np.sum(data == c))
+
+    actual_femur = get_best_label(femur_candidates, data, unique_labels)
+    actual_tibia = get_best_label(tibia_candidates, data, unique_labels)
+    
+    # --- UPGRADE: Anatomical Spatial Validation ---
+    if actual_femur is not None and actual_tibia is not None:
+        # Calculate centroids along Z-axis (superior-inferior)
+        # Using voxel coordinates is sufficient for relative comparison
+        f_z = np.mean(np.argwhere(data == actual_femur)[:, 2])
+        t_z = np.mean(np.argwhere(data == actual_tibia)[:, 2])
+        
+        # Determine if orientation is flipped (Tibia above Femur)
+        # We'll log it but not necessarily reject if the user data is inverted
+        if t_z > f_z:
+            print(f"  [ANATOMICAL NOTE] Tibia (Z: {t_z:.1f}) is above Femur (Z: {f_z:.1f}). Proceeding with detected labels...")
     
     output_dir = DATA / "meshes"
     os.makedirs(output_dir, exist_ok=True)
     
     voxel_vol = np.prod(img.header.get_zooms()) / 1000.0 # in cc
+
+    # Load raw volume for metal filtering if available
+    raw_vol_path = DATA / "NIfTI" / f"{volume_name}_prepped.nii.gz"
+    if not raw_vol_path.exists():
+        raw_vol_path = DATA / "NIfTI" / f"{volume_name}_raw.nii.gz"
     
-    min_vol = 200 if is_mr else 400
-    
+    raw_data = nib.load(str(raw_vol_path)).get_fdata() if raw_vol_path.exists() else None
+
     for label_id, name in [(actual_femur, "femur"), (actual_tibia, "tibia")]:
         print(f"Processing {name} (ID: {label_id})...")
         mesh = None
         
+        # Enable morphological separation for the tibia to disconnect rods/hardware
+        use_sep = (name == "tibia")
+        
         if label_id:
             mask = (data == label_id).astype(np.uint8)
             vol_cc = np.sum(mask) * voxel_vol
-            if vol_cc > min_vol: 
-                mesh = extract_mesh(data, label_id, img.affine)
+            if vol_cc > MIN_BONE_VOLUME_CC: 
+                mesh = extract_mesh(data, label_id, img.affine, raw_data=raw_data, use_separation=use_sep)
             else:
-                print(f"  Warning: AI {name} mesh is too small ({vol_cc:.1f}cc).")
+                print(f"  Warning: AI {name} mesh is too small ({vol_cc:.1f}cc < {MIN_BONE_VOLUME_CC}cc).")
                 if not is_mr:
                     print("  Triggering HU Fallback...")
         
@@ -208,6 +337,14 @@ def process_volume(volume_name="S0001", is_mr=False):
             print(f"  Successfully exported clinical {name}: {volume_name}_{name}.stl")
         elif is_mr:
              print(f"  Warning: Skipping {name} for MR as AI result was insufficient and no fallback available.")
+
+    # --- UPGRADE: Metal Hardware Extraction ---
+    if raw_data is not None and not is_mr:
+        hardware_mesh = extract_metal_hardware(raw_data, img.affine)
+        if hardware_mesh:
+            hw_path = output_dir / f"{volume_name}_hardware.stl"
+            hardware_mesh.export(str(hw_path))
+            print(f"  Successfully exported metal hardware: {hw_path.name}")
 
 if __name__ == "__main__":
     import argparse
