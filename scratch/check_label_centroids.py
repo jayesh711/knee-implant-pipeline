@@ -1,45 +1,40 @@
 import nibabel as nib
 import numpy as np
-from pathlib import Path
+from skimage import measure
 
-DATA_DIR = Path(r"d:\knee-implant-pipeline\knee-implant-pipeline\data")
+patient = "AB_72_Y_Male-Right_Knee"
+seg_path = f"data/segmentations/phase1/{patient}.nii"
 
-def check_centroids(volume_name):
-    seg_file = DATA_DIR / "segmentations" / "phase1" / f"{volume_name}.nii"
-    if not seg_file.exists():
-        seg_file = DATA_DIR / "segmentations" / "phase1" / f"{volume_name}.nii.gz"
-    
-    if not seg_file.exists():
-        print(f"File not found: {seg_file}")
-        return
+print(f"Loading {seg_path}...")
+img = nib.load(seg_path)
+data = img.get_fdata()
 
-    print(f"Analyzing Centroids: {seg_file}")
-    img = nib.load(str(seg_file))
-    data = img.get_fdata()
-    affine = img.affine
-    
-    unique_labels = np.unique(data).astype(int)
-    
-    print(f"{'LabelID':<10} | {'Centroid (Voxel)':<20} | {'Centroid (World)':<20} | {'Volume (cc)':<10}")
-    print("-" * 75)
-    
-    zooms = img.header.get_zooms()
-    voxel_vol = np.prod(zooms) / 1000.0
-    
-    for label in unique_labels:
-        if label == 0: continue
-        mask = (data == label)
-        count = np.sum(mask)
-        if count == 0: continue
-        
-        indices = np.argwhere(mask)
-        centroid_voxel = indices.mean(axis=0)
-        
-        # Convert to world coordinates
-        centroid_world = (affine[:3, :3] @ centroid_voxel) + affine[:3, 3]
-        
-        vol = count * voxel_vol
-        print(f"{label:<10} | {str(np.round(centroid_voxel, 1)):<20} | {str(np.round(centroid_world, 1)):<20} | {vol:<10.2f}")
+# Identify all major components in the segmentation
+# TotalSegmentator labels are often 1-117
+labels = np.unique(data).astype(int)
+print(f"Unique labels: {labels}")
 
-if __name__ == "__main__":
-    check_centroids("AB_72_Y_Male-Right_Knee")
+def get_major_components(label_id):
+    mask = (data == label_id)
+    lbl, num = measure.label(mask, return_num=True)
+    if num == 0: return []
+    props = measure.regionprops(lbl)
+    # Filter for components > 5000 voxels
+    return [p for p in props if p.area > 5000]
+
+# Check label 76 (Assumed Femur)
+f_comps = get_major_components(76)
+for i, p in enumerate(f_comps):
+    print(f"Femur (76) Component {i}: Centroid {p.centroid}, Area {p.area}")
+
+# Check label 81 (Assumed Tibia)
+t_comps = get_major_components(81)
+for i, p in enumerate(t_comps):
+    print(f"Tibia (81) Component {i}: Centroid {p.centroid}, Area {p.area}")
+
+# Check other labels present
+for l in [18, 20, 21, 22, 25, 26]:
+    if l in labels:
+        comps = get_major_components(l)
+        for i, p in enumerate(comps):
+            print(f"Label {l} Component {i}: Centroid {p.centroid}, Area {p.area}")

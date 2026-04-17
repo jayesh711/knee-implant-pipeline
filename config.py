@@ -22,7 +22,7 @@ HU_CORTICAL_MIN  = 700
 HU_CORTICAL_MAX  = 1800
 HU_CANAL_MIN     = -100
 HU_CANAL_MAX     = 400
-HU_METAL_MIN     = 2000   # Phase 2: implant isolation
+HU_METAL_MIN     = 2500   # Phase 2: implant isolation
 HU_METAL_ARTIFACT = 3000
 
 # Preprocessing: Phase 1 Foundations

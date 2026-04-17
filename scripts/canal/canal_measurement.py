@@ -138,11 +138,42 @@ def process_patient_canal(patient_name, is_mr=False):
     present_labels = np.unique(sample_data)
     
     femur_labels = [76, 75, 44, 25, 24, 94, 93]
-    tibia_labels = [46, 45, 4, 3, 27, 26]
-    
+    tibia_labels = [81, 80, 46, 45, 4, 3, 27, 26]
+
+    def pick_best_label(candidates, present, sample):
+        valid = [l for l in candidates if l in present]
+        if not valid:
+            return None
+        return max(valid, key=lambda l: np.sum(sample == l))
+
+    # Pre-select both labels and validate anatomical ordering before processing.
+    # TotalSegmentator sometimes assigns a hip/pelvis label ID that also appears in
+    # the tibia candidate list (e.g. label 80 for left-side scans). If the picked
+    # tibia centroid is superior to the femur centroid we must invalidate it so the
+    # HU fallback runs instead of computing a canal on the wrong structure.
+    ai_femur_id = pick_best_label(femur_labels, present_labels, sample_data)
+    ai_tibia_id = pick_best_label(tibia_labels, present_labels, sample_data)
+
+    if ai_femur_id is not None and ai_tibia_id is not None:
+        seg_full = np.asarray(seg_proxy)
+        z_dir = np.sign(seg_img.affine[2, 2])
+        f_z = np.mean(np.argwhere(seg_full == ai_femur_id)[:, 2])
+        t_z = np.mean(np.argwhere(seg_full == ai_tibia_id)[:, 2])
+        is_anatomical = (t_z < f_z) if z_dir > 0 else (t_z > f_z)
+        if not is_anatomical:
+            print(f"  [ANATOMICAL ERROR] Tibia label {ai_tibia_id} (Z={t_z:.1f}) is superior to "
+                  f"femur label {ai_femur_id} (Z={f_z:.1f}). Invalidating AI tibia — HU fallback will run.")
+            ai_tibia_id = None
+
+    bone_id_map = {"femur": ai_femur_id, "tibia": ai_tibia_id}
+
     for bone_name, target_labels in [("femur", femur_labels), ("tibia", tibia_labels)]:
         print(f"Checking {bone_name}...")
-        bone_id = next((l for l in target_labels if l in present_labels), None)
+        bone_id = bone_id_map[bone_name]
+        if bone_id is None:
+            valid_labels = []
+        else:
+            valid_labels = [bone_id]
         
         mask = None
         bone_slice = None 

@@ -77,26 +77,39 @@ def ingest_series(dicom_dir, volume_name):
     
     # 1. Load DICOM
     reader = sitk.ImageSeriesReader()
-    dicom_names = reader.GetGDCMSeriesFileNames(str(dicom_dir))
     
-    # NEW: Recursive Search for nested DICOM structures
-    if not dicom_names:
+    # Get all series IDs in the directory
+    series_ids = reader.GetGDCMSeriesIDs(str(dicom_dir))
+    
+    if not series_ids:
+        # Recursive search for nested structures
         print("  Direct folder contains no series. Searching subdirectories...")
         all_series = []
         for root, dirs, files in os.walk(dicom_dir):
-            series_files = reader.GetGDCMSeriesFileNames(root)
-            if series_files:
-                all_series.append((root, len(series_files), series_files))
+            s_ids = reader.GetGDCMSeriesIDs(root)
+            for s_id in s_ids:
+                s_files = reader.GetGDCMSeriesFileNames(root, s_id)
+                all_series.append((s_id, len(s_files), s_files, root))
         
         if all_series:
             # Pick the largest series (to avoid localizers/scouts)
             all_series.sort(key=lambda x: x[1], reverse=True)
-            best_dir, best_count, best_names = all_series[0]
-            print(f"  Found main volume in: {best_dir} ({best_count} slices)")
+            best_id, best_count, best_names, best_dir = all_series[0]
+            print(f"  Found largest series '{best_id}' in: {best_dir} ({best_count} slices)")
             dicom_names = best_names
         else:
             print(f"Error: No DICOM series found in {dicom_dir} or its subdirectories.")
             return
+    else:
+        # Multiple series in the direct folder - pick the one with most files
+        series_counts = []
+        for s_id in series_ids:
+            s_files = reader.GetGDCMSeriesFileNames(str(dicom_dir), s_id)
+            series_counts.append((s_id, len(s_files), s_files))
+        
+        series_counts.sort(key=lambda x: x[1], reverse=True)
+        best_id, best_count, dicom_names = series_counts[0]
+        print(f"  Selected largest series '{best_id}' from {len(series_ids)} candidates ({best_count} slices)")
     
     reader.SetFileNames(dicom_names)
     img = reader.Execute()
