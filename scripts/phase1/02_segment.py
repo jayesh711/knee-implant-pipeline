@@ -16,13 +16,13 @@ def run_segmentation(volume_name="S0001"):
     
     print(f"--- Starting TotalSegmentator for {volume_name} ---")
     print(f"Input:  {input_file}")
-    # Use 'total' task on PURE SIGNAL (raw resampled) to fix 'holey' bones
-    print(f"Running Pure Signal TotalSegmentator (Task: total) on {input_file}...")
+    # Use 'bones' task for high-resolution orthopedic segmentation
+    print(f"Running Pure Signal TotalSegmentator (Task: bones) on {input_file}...")
     
     # Run totalsegmentator via subprocess
     try:
         subprocess.run([
-            r"D:\conda_envs\knee-pipeline\Scripts\totalsegmentator.exe",
+            r"C:\Users\dongr\anaconda3\envs\knee-pipeline\Scripts\totalsegmentator.exe",
             "-i", str(input_file),
             "-o", str(output_dir),
             "--ml",           # Multi-label output in a single file

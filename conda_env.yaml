@@ -1,0 +1,26 @@
+name: knee-pipeline
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8 # Adjust based on your GPU
+  - nibabel
+  - numpy
+  - scipy
+  - scikit-image
+  - trimesh
+  - pyvista
+  - pymeshlab
+  - pip:
+      - simpleitk
+      - totalsegmentator
+      - monai
+      - python-dotenv
+      - pyyaml

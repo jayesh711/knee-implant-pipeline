@@ -7,15 +7,15 @@ from pathlib import Path
 import os
 from config import DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN, MIN_BONE_VOLUME_CC
 
-def extract_mesh(seg_data, label_id, affine, raw_data=None):
+def extract_mesh(seg_data, label_id, affine, raw_data=None, metal_threshold=HU_METAL_MIN):
     """Generate a high-fidelity mesh for a specific label ID using full affine alignment."""
     # 1. Create binary mask
     mask = (seg_data == label_id).astype(np.uint8)
     
     # --- UPGRADE: Metal Rod Filtering ---
     if raw_data is not None:
-        print(f"    Filtering out high-density metal (> {HU_METAL_MIN} HU)...")
-        mask[raw_data > HU_METAL_MIN] = 0
+        print(f"    Filtering out high-density hardware (> {metal_threshold} HU)...")
+        mask[raw_data > metal_threshold] = 0
     
     if not np.any(mask):
         print(f"Warning: Label {label_id} not found or fully masked out by metal filter.")
@@ -66,8 +66,8 @@ def extract_mesh(seg_data, label_id, affine, raw_data=None):
     final_m = ms.current_mesh()
     return trimesh.Trimesh(vertices=final_m.vertex_matrix(), faces=final_m.face_matrix())
 
-def fallback_to_hu(volume_name, bone_name="tibia"):
-    """Surgical fallback using Anatomical Z-Sorting of high-HU components."""
+def fallback_to_hu(volume_name, bone_name="tibia", superior_bbox=None):
+    """Surgical fallback using Anatomical Z-Sorting and Spatial Constraints."""
     # Must use the raw volume (HU values). The prepped volume is z-score normalized,
     # so the 250 HU bone threshold below would produce an empty mask on prepped data.
     raw_volume = DATA / "NIfTI" / f"{volume_name}_raw.nii.gz"
@@ -81,37 +81,84 @@ def fallback_to_hu(volume_name, bone_name="tibia"):
     img = nib.load(str(raw_volume))
     affine = img.affine
 
-    # 1. Threshold for bone
-    print(f"    Scanning volume for bone density (Memory-Safe Mode)...")
+    # 1. Threshold for bone (Upgraded floor for better isolation)
+    # Cortical bone is typically > 400 HU. Increasing this prevents "fuzzy" joint connections.
+    floor_hu = 350 if bone_name == "tibia" else 250
+    print(f"    Scanning volume for bone density (Min HU: {floor_hu}, Metal Max: {HU_METAL_MIN})...")
 
     # Identify components in a 2x lower-res space directly from disk
     ds_factor = 2
     raw_ds = np.asarray(img.dataobj[::ds_factor, ::ds_factor, ::ds_factor])
 
     # Bone thresholding while EXCLUDING metal rod (> HU_METAL_MIN)
-    mask_ds = ((raw_ds > 250) & (raw_ds < HU_METAL_MIN)).astype(np.uint8)
+    mask_ds = ((raw_ds > floor_hu) & (raw_ds < HU_METAL_MIN)).astype(np.uint8)
     
+    # --- UPGRADE: Anatomical ROI Cropping ---
+    # 1. Feet Removal: Most clinical knee scans with "hip to end" FOV contain feet.
+    # Tibia ends at the ankle. Remove bottom 15% of the scan to isolate from feet.
+    z_dim = mask_ds.shape[2]
+    mask_ds[:, :, :int(z_dim * 0.15)] = 0
+    
+    # 2. Femur-Guided Superior Crop: If we found the femur, the tibia MUST be below it.
+    if bone_name == "tibia" and superior_bbox is not None:
+        # superior_bbox is (minr, minc, minz, maxr, maxc, maxz) from regionprops (high-res)
+        # Convert to downsampled Z
+        femur_distal_z = superior_bbox[2] // ds_factor
+        # Apply crop: Everything above the femur's distal end (minus small buffer) is ignored.
+        buffer_voxels = 20 // ds_factor 
+        print(f"    Applying spatial constraint: Ignoring anatomy above Z={femur_distal_z * ds_factor}")
+        mask_ds[:, :, femur_distal_z:] = 0
+
     labels_ds = measure.label(mask_ds)
-    props = measure.regionprops(labels_ds)
+    props = measure.regionprops(labels_ds, intensity_image=raw_ds)
     
-    # 2. HEAVYWEIGHT SELECTION: Identify main bone structures by volume
-    bone_props = [p for p in props if p.area > 5000] # Min volume filter
-    if len(bone_props) < 2: 
-        print(f"    Error: Found only {len(bone_props)} bone structures. Need at least 2.")
+    # 2. SELECTION: Distinguish Bone from Hardware using Intensity and Geometry
+    # We want a component that lives in the 400-1500 HU range and isn't too "skinny" (rod-like)
+    scored_candidates = []
+    
+    for p in props:
+        if p.area < 5000: continue # Ignore small noise
+        
+        # Calculate Physical Markers
+        mean_hu = p.mean_intensity
+        z_len = p.bbox[5] - p.bbox[2]
+        width = max(p.bbox[3]-p.bbox[0], p.bbox[4]-p.bbox[1])
+        aspect_ratio = z_len / width if width > 0 else 0
+        
+        # Scoring Logic:
+        # 1. Intensity Penalty: Structural metal (rods) usually have Mean HU > 1800
+        intensity_score = 1.0
+        if mean_hu > 1800:
+            intensity_score = 0.1 # Heavily penalize metal hardware
+        elif mean_hu < 500:
+            intensity_score = 0.5 # Penalize low-density noise
+            
+        # 2. Geometry Penalty: Rods have high aspect ratios (thin and long)
+        # Tibia is thick. Rod is thin.
+        geometry_score = 1.0
+        if aspect_ratio > 7.0: # Rod-like
+             geometry_score = 0.2
+             
+        # Combined score prioritized by volume (area)
+        total_score = p.area * intensity_score * geometry_score
+        
+        scored_candidates.append({
+            'prop': p,
+            'score': total_score,
+            'mean_hu': mean_hu,
+            'aspect': aspect_ratio
+        })
+    
+    if not scored_candidates: 
+        print(f"    Error: No valid bone-like structures found for {bone_name}.")
         return None
         
-    # Pick top 3 largest components to capture Pelvis/Femur/Tibia while ignoring noise
-    bone_props.sort(key=lambda x: x.area, reverse=True)
-    candidates = bone_props[:3]
-    
-    # Sort these main bones by Z-centroid (Vertical position)
-    candidates.sort(key=lambda x: x.centroid[2], reverse=True)
-    
-    if bone_name == "femur":
-        # If 2 bones found: top is Femur. If 3: [Pelvis, Femur, Tibia]
-        target_prop = candidates[0] if len(candidates) == 2 else candidates[1]
-    else: # tibia
-        target_prop = candidates[-1] # Bottom-most among the main structures
+    # Pick the candidate with the highest anatomical score
+    scored_candidates.sort(key=lambda x: x['score'], reverse=True)
+    best = scored_candidates[0]
+    target_prop = best['prop']
+        
+    print(f"    Selected {bone_name} candidate (Area: {target_prop.area}, Mean HU: {best['mean_hu']:.1f}, Aspect: {best['aspect']:.2f})")
         
     print(f"    Selected component at Z-centroid {target_prop.centroid[2] * ds_factor:.1f} as {bone_name}")
     
@@ -126,8 +173,25 @@ def fallback_to_hu(volume_name, bone_name="tibia"):
     maxr, maxc, maxz = min(img.shape[0], maxr+buffer), min(img.shape[1], maxc+buffer), min(img.shape[2], maxz+buffer)
     
     sub_vol = np.asarray(img.dataobj[minr:maxr, minc:maxc, minz:maxz])
-    # Bone threshold with metal protection
-    bone_mask = ((sub_vol > 250) & (sub_vol < HU_METAL_MIN)).astype(np.uint8)
+    
+    # --- UPGRADE: Segment-Level Rod Subtraction ---
+    # To remove the internal rod from the tibia, we use a much lower intensity ceiling (1800 HU)
+    # compared to the general metal filter (2500+ HU).
+    mesh_ceiling = 1800 if bone_name == "tibia" else HU_METAL_MIN
+    print(f"    Surface Extraction: Bone Threshold {floor_hu} - {mesh_ceiling} HU (Subtracting hardware > {mesh_ceiling})...")
+    
+    # Bone threshold with strict metal subtraction
+    bone_mask = ((sub_vol > floor_hu) & (sub_vol < mesh_ceiling)).astype(np.uint8)
+    
+    # --- UPGRADE: Final Connectivity Clean ---
+    # After subtracting the rod, the mask might contain floating "husks" or artifacts.
+    # Keep strictly the largest connected component (the actual Tibia bone).
+    labels_final = measure.label(bone_mask)
+    if labels_final.max() > 1:
+        print(f"    Cleaning up residual hardware: Found {labels_final.max()} disconnected parts. Keeping largest bone body...")
+        counts = np.bincount(labels_final.flat)
+        largest_label = np.argmax(counts[1:]) + 1
+        bone_mask = (labels_final == largest_label).astype(np.uint8)
     
     # Generate mesh with local offset
     verts, faces, _, _ = measure.marching_cubes(bone_mask, level=0.5)
@@ -181,10 +245,11 @@ def process_volume(volume_name="S0001", is_mr=False):
             print(f"Error: No segmentation for {volume_name}. Skipping MRI fallback.")
             return
         print(f"Error: No segmentation for {volume_name}. Fallback triggered.")
-        femur = fallback_to_hu(volume_name, "femur")
-        tibia = fallback_to_hu(volume_name, "tibia")
-        if femur: femur.export(DATA / "meshes" / f"{volume_name}_femur.stl")
-        if tibia: tibia.export(DATA / "meshes" / f"{volume_name}_tibia.stl")
+        # Without AI segmentation, we can't use superior_bbox constraints reliably
+        femur_mesh = fallback_to_hu(volume_name, "femur")
+        tibia_mesh = fallback_to_hu(volume_name, "tibia")
+        if femur_mesh: femur_mesh.export(DATA / "meshes" / f"{volume_name}_femur.stl")
+        if tibia_mesh: tibia_mesh.export(DATA / "meshes" / f"{volume_name}_tibia.stl")
         return
         
     print(f"--- UPGRADED Mesh generation for {volume_name} (Mode: {'MRI' if is_mr else 'CT'}) ---")
@@ -194,8 +259,10 @@ def process_volume(volume_name="S0001", is_mr=False):
     unique_labels = np.unique(data).astype(int)
     
     # Candidates for various TotalSegmentator models/versions (TS v1 and v2)
-    femur_candidates = [13, 14, 76, 77, 75, 44, 43, 2, 1, 25, 24] 
-    tibia_candidates = [2, 46, 45, 4, 3, 27, 26, 80, 81] 
+    # Candidates for various TotalSegmentator models/versions (TS v1 and v2)
+    # v2: 75=femur_left, 76=femur_right, 77=tibia_left, 78=tibia_right
+    femur_candidates = [75, 76, 13, 14, 24, 25] 
+    tibia_candidates = [77, 78, 2, 46, 45, 26, 27] 
     
     # ROBUST SELECTION: Pick the largest component among valid candidates
     def get_best_label(candidates, data, unique_labels):
@@ -239,6 +306,15 @@ def process_volume(volume_name="S0001", is_mr=False):
     
     raw_data = nib.load(str(raw_vol_path)).get_fdata() if raw_vol_path.exists() else None
 
+    # Cache the femur bounding box from AI segmentation to guide Tibia fallback if needed
+    femur_bbox = None
+    if actual_femur:
+        # Calculate bounding box of femur in AI label map
+        f_mask = (data == actual_femur)
+        f_props = measure.regionprops(f_mask.astype(np.uint8))
+        if f_props:
+            femur_bbox = f_props[0].bbox
+
     for label_id, name in [(actual_femur, "femur"), (actual_tibia, "tibia")]:
         print(f"Processing {name} (ID: {label_id})...")
         mesh = None
@@ -247,14 +323,17 @@ def process_volume(volume_name="S0001", is_mr=False):
             mask = (data == label_id).astype(np.uint8)
             vol_cc = np.sum(mask) * voxel_vol
             if vol_cc > MIN_BONE_VOLUME_CC: 
-                mesh = extract_mesh(data, label_id, img.affine, raw_data=raw_data)
+                # Apply the same 1800 HU ceiling for tibia mesh subtraction in AI path
+                local_metal_max = 1800 if name == "tibia" else HU_METAL_MIN
+                mesh = extract_mesh(data, label_id, img.affine, raw_data=raw_data, metal_threshold=local_metal_max)
             else:
                 print(f"  Warning: AI {name} mesh is too small ({vol_cc:.1f}cc < {MIN_BONE_VOLUME_CC}cc).")
                 if not is_mr:
                     print("  Triggering HU Fallback...")
         
         if mesh is None and not is_mr:
-            mesh = fallback_to_hu(volume_name, name)
+            # Pass femur_bbox as a superior constraint for tibia fallback
+            mesh = fallback_to_hu(volume_name, name, superior_bbox=femur_bbox if name == "tibia" else None)
             
         if mesh:
             mesh.export(str(output_dir / f"{volume_name}_{name}.stl"))
