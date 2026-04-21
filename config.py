@@ -38,3 +38,9 @@ SMOOTH_ITERS     = 10
 # Preprocessing Settings
 DEFAULT_SPACING     = (0.5, 0.5, 0.5)  # 0.5mm isotropic
 DEFAULT_ORIENTATION = "LPS"             # Standard medical orientation
+
+# TotalSegmentator License Key (for premium tasks: appendicular_bones, etc.)
+TOTALSEG_LICENSE_KEY = os.getenv("TOTALSEG_LICENSE_KEY", "")
+
+# 3D Slicer Path
+SLICER_PATH = os.getenv("SLICER_PATH", r"D:\3D Slicer 5.10.0\Slicer.exe")
