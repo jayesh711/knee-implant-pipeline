@@ -12,6 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run full clinical pipeline for a single patient DICOM folder.")
     parser.add_argument("dicom_path", type=str, help="Path to the folder containing DICOM files (.dcm)")
     parser.add_argument("--name", type=str, required=True, help="Patient/Volume name for outputs")
+    parser.add_argument("--canal", action="store_true", help="Also run medullary canal analysis (skipped by default)")
     
     args = parser.parse_args()
     
@@ -44,8 +45,11 @@ def main():
         # 3. 3D Mesh Reconstruction (Taubin Smoothing + QEM)
         run_command([python_exe, "-m", "scripts.phase1.03_extract_and_mesh", "--name", name])
         
-        # 4. Medullary Canal Analysis (Centerline + Diameter)
-        run_command([python_exe, "-m", "scripts.canal.canal_measurement", "--name", name])
+        # 4. Medullary Canal Analysis (Centerline + Diameter) — opt-in via --canal
+        if args.canal:
+            run_command([python_exe, "-m", "scripts.canal.canal_measurement", "--name", name])
+        else:
+            print("\n>> Skipping canal measurement (use --canal to enable)")
         
         # 5. Optional: Ground Truth Reconstruction (HU Signal Baseline)
         run_command([python_exe, "-m", "scripts.reconstruct_ground_truth", "--name", name])
