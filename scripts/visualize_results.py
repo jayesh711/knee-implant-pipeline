@@ -40,14 +40,14 @@ def visualize_with_slicer(name="S0001"):
         mesh_path = mesh_dir / mesh_name
         if mesh_path.exists():
             files_to_load.append(str(mesh_path))
-            print(f"  ✔ Loading mesh: {mesh_name}")
+            print(f"  [OK] Loading mesh: {mesh_name}")
     
     canal_dir = DATA / "canal" / name
     for bone in ["femur", "tibia"]:
         skel_path = canal_dir / f"{bone}_skeleton.nii.gz"
         if skel_path.exists():
             files_to_load.append(str(skel_path))
-            print(f"  ✔ Loading canal skeleton: {bone}")
+            print(f"  [OK] Loading canal skeleton: {bone}")
     
     if not files_to_load:
         print(f"Error: No output files found for patient '{name}'. Run the pipeline first.")

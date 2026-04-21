@@ -29,7 +29,7 @@ def _setup_license():
             [str(license_exe), "-l", TOTALSEG_LICENSE_KEY],
             check=True, capture_output=True, text=True
         )
-        print(f"  ✔ License activated successfully.")
+        print(f"  [OK] License activated successfully.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"  Warning: License activation failed ({e.stderr.strip()}). Using free tasks.")
@@ -103,10 +103,10 @@ def run_segmentation(volume_name="S0001"):
                 "--task", task_name,
                 "--quiet"             # Reduce terminal noise
             ], check=True)
-            print(f"  ✔ Successfully completed segmentation with task '{task_name}'")
+            print(f"  [OK] Successfully completed segmentation with task '{task_name}'")
             return  # Success — stop trying
         except subprocess.CalledProcessError as e:
-            print(f"  ✘ Task '{task_name}' failed: {e}")
+            print(f"  [FAILED] Task '{task_name}' failed: {e}")
             if task_name != tasks_to_try[-1][0]:
                 print(f"  Falling back to next task...")
             continue
