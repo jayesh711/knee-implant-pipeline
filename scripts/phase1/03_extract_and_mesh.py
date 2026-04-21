@@ -82,8 +82,8 @@ def fallback_to_hu(volume_name, bone_name="tibia", superior_bbox=None):
     affine = img.affine
 
     # 1. Threshold for bone (Upgraded floor for better isolation)
-    # Cortical bone is typically > 400 HU. Increasing this prevents "fuzzy" joint connections.
-    floor_hu = 350 if bone_name == "tibia" else 250
+    # Cortical bone is > 400. Spongy bone is 150-300. Loweringfloor to 200 captures distal ends.
+    floor_hu = 200 if bone_name == "tibia" else 250
     print(f"    Scanning volume for bone density (Min HU: {floor_hu}, Metal Max: {HU_METAL_MIN})...")
 
     # Identify components in a 2x lower-res space directly from disk
@@ -93,21 +93,36 @@ def fallback_to_hu(volume_name, bone_name="tibia", superior_bbox=None):
     # Bone thresholding while EXCLUDING metal rod (> HU_METAL_MIN)
     mask_ds = ((raw_ds > floor_hu) & (raw_ds < HU_METAL_MIN)).astype(np.uint8)
     
-    # --- UPGRADE: Anatomical ROI Cropping ---
-    # 1. Feet Removal: Most clinical knee scans with "hip to end" FOV contain feet.
-    # Tibia ends at the ankle. Remove bottom 15% of the scan to isolate from feet.
+    # --- UPGRADE: Anatomical ROI Cropping (v2: Adaptive Joint Detection) ---
     z_dim = mask_ds.shape[2]
-    mask_ds[:, :, :int(z_dim * 0.15)] = 0
     
-    # 2. Femur-Guided Superior Crop: If we found the femur, the tibia MUST be below it.
+    # 1. Distal (Ankle) Removal: Adaptive Bottleneck Detection
+    # Calculate bone area per slice to find the ankle joint narrowing
+    z_profile = np.sum(mask_ds, axis=(0,1))
+    
+    # Foot bones usually create a massive area "peak" at the very bottom.
+    # We look for the "valley" (narrowing) between the Foot Peak and the Tibia Shaft.
+    if len(z_profile) > 100:
+        # Scan the bottom 25% for the foot peak
+        search_range = int(z_dim * 0.25)
+        foot_region = z_profile[:search_range]
+        if np.any(foot_region > 0):
+            foot_peak_z = np.argmax(foot_region)
+            # Find the first significant narrowing (valley) above the foot peak
+            # We look for a slice where area is < 60% of the foot peak or just small.
+            for z in range(foot_peak_z, search_range):
+                if z_profile[z] < foot_region[foot_peak_z] * 0.4:
+                    print(f"    [OK] Detected Ankle Bottleneck at Z={z * ds_factor}. Detaching feet...")
+                    mask_ds[:, :, :z] = 0
+                    break
+
+    # 2. Adaptive Superior Constraint (v3: Soft Separation)
+    # We no longer wipe out slices above the tibia. Instead, we use the Femur
+    # as a "Repelled Space" to guide component selection.
+    femur_distal_z = None
     if bone_name == "tibia" and superior_bbox is not None:
-        # superior_bbox is (minr, minc, minz, maxr, maxc, maxz) from regionprops (high-res)
-        # Convert to downsampled Z
         femur_distal_z = superior_bbox[2] // ds_factor
-        # Apply crop: Everything above the femur's distal end (minus small buffer) is ignored.
-        buffer_voxels = 20 // ds_factor 
-        print(f"    Applying spatial constraint: Ignoring anatomy above Z={femur_distal_z * ds_factor}")
-        mask_ds[:, :, femur_distal_z:] = 0
+        print(f"    Anatomical Guidance: Femur distal end detected at Z={femur_distal_z * ds_factor}. Seeking tibia below...")
 
     labels_ds = measure.label(mask_ds)
     props = measure.regionprops(labels_ds, intensity_image=raw_ds)
@@ -139,8 +154,16 @@ def fallback_to_hu(volume_name, bone_name="tibia", superior_bbox=None):
         if aspect_ratio > 7.0: # Rod-like
              geometry_score = 0.2
              
+        # 3. Spatial Score (Anatomical Position)
+        # Tibia centroid MUST be significantly below the Femur distal end.
+        spatial_score = 1.0
+        if femur_distal_z is not None:
+            centroid_z = p.centroid[2]
+            if centroid_z > femur_distal_z - 5: # Too close or above
+                spatial_score = 0.1
+                
         # Combined score prioritized by volume (area)
-        total_score = p.area * intensity_score * geometry_score
+        total_score = p.area * intensity_score * geometry_score * spatial_score
         
         scored_candidates.append({
             'prop': p,
@@ -178,17 +201,27 @@ def fallback_to_hu(volume_name, bone_name="tibia", superior_bbox=None):
     # To remove the internal rod from the tibia, we use a much lower intensity ceiling (1800 HU)
     # compared to the general metal filter (2500+ HU).
     mesh_ceiling = 1800 if bone_name == "tibia" else HU_METAL_MIN
-    print(f"    Surface Extraction: Bone Threshold {floor_hu} - {mesh_ceiling} HU (Subtracting hardware > {mesh_ceiling})...")
-    
+    # --- UPGRADE: Anatomical Joint Separation (V3) ---
+    # To prevent the "Plane" cut and restore curved condyles, we avoid hard Z-crops.
+    # Instead, we identify the specific bone body and use morphological clean-up.
     # Bone threshold with strict metal subtraction
-    bone_mask = ((sub_vol > floor_hu) & (sub_vol < mesh_ceiling)).astype(np.uint8)
+    sub_mask = ((sub_vol > floor_hu) & (sub_vol < mesh_ceiling)).astype(np.uint8)
     
-    # --- UPGRADE: Final Connectivity Clean ---
-    # After subtracting the rod, the mask might contain floating "husks" or artifacts.
-    # Keep strictly the largest connected component (the actual Tibia bone).
+    # If the sub-volume likely contains both bones (merging at the joint),
+    # use morphological opening to break the bridge while keeping curved ends.
+    from skimage.morphology import binary_opening, ball
+    # A small opening (radius 2) kills the thin "bridges" in the joint space
+    # but leaves the large rounded bone heads mostly intact.
+    bone_mask = binary_opening(sub_mask, ball(2)).astype(np.uint8)
+    
+    # --- UPGRADE: Final Connectivity & Morphological Clean ---
+    # Morphological opening (radius 1) to break thin bridges to hardware/bone dust
+    from skimage.morphology import binary_opening, ball
+    bone_mask = binary_opening(bone_mask, ball(1)).astype(np.uint8)
+
     labels_final = measure.label(bone_mask)
     if labels_final.max() > 1:
-        print(f"    Cleaning up residual hardware: Found {labels_final.max()} disconnected parts. Keeping largest bone body...")
+        print(f"    Cleaning up residual hardware/dust: Found {labels_final.max()} parts. Keeping largest bone body...")
         counts = np.bincount(labels_final.flat)
         largest_label = np.argmax(counts[1:]) + 1
         bone_mask = (labels_final == largest_label).astype(np.uint8)

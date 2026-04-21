@@ -59,7 +59,7 @@ def visualize_with_slicer(name="S0001"):
     
     try:
         subprocess.Popen(cmd)
-        print(f"  ✔ 3D Slicer launched successfully.")
+        print(f"  [OK] 3D Slicer launched successfully.")
         print(f"  (Slicer is running in a separate window)")
     except Exception as e:
         print(f"  Error launching 3D Slicer: {e}")
