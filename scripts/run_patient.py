@@ -13,6 +13,7 @@ def main():
     parser.add_argument("dicom_path", type=str, help="Path to the folder containing DICOM files (.dcm)")
     parser.add_argument("--name", type=str, required=True, help="Patient/Volume name for outputs")
     parser.add_argument("--canal", action="store_true", help="Also run medullary canal analysis (skipped by default)")
+    parser.add_argument("--has-metal", action="store_true", help="Enable HU-based hardware filtering for post-op patients with metal implants")
     
     args = parser.parse_args()
     
@@ -43,7 +44,10 @@ def main():
         run_command([python_exe, "-m", "scripts.phase1.02_segment", "--name", name])
         
         # 3. 3D Mesh Reconstruction (Taubin Smoothing + QEM)
-        run_command([python_exe, "-m", "scripts.phase1.03_extract_and_mesh", "--name", name])
+        mesh_cmd = [python_exe, "-m", "scripts.phase1.03_extract_and_mesh", "--name", name]
+        if args.has_metal:
+            mesh_cmd.append("--has-metal")
+        run_command(mesh_cmd)
         
         # 4. Medullary Canal Analysis (Centerline + Diameter) — opt-in via --canal
         if args.canal:

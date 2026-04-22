@@ -36,11 +36,11 @@ def visualize_with_slicer(name="S0001"):
     files_to_load = []
     
     mesh_dir = DATA / "meshes"
-    for mesh_name in [f"{name}_femur.stl", f"{name}_tibia.stl", f"{name}_ground_truth.stl"]:
-        mesh_path = mesh_dir / mesh_name
-        if mesh_path.exists():
-            files_to_load.append(str(mesh_path))
-            print(f"  [OK] Loading mesh: {mesh_name}")
+    # Search for all STL files related to this patient
+    patient_meshes = list(mesh_dir.glob(f"{name}*.stl"))
+    for mesh_path in patient_meshes:
+        files_to_load.append(str(mesh_path))
+        print(f"  [OK] Loading mesh: {mesh_path.name}")
     
     canal_dir = DATA / "canal" / name
     for bone in ["femur", "tibia"]:
