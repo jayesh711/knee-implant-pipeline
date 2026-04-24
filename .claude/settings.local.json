@@ -3,7 +3,9 @@
     "allow": [
       "PowerShell($env:PYTHONPATH = \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\"; & \"D:\\\\conda_envs\\\\knee-pipeline\\\\Scripts\\\\TotalSegmentator.exe\" -i \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\NIfTI\\\\AB_72Y_Male_Left_Knee_raw.nii.gz\" -o \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\segmentations\\\\phase1\\\\AB_72Y_Male_Left_Knee_total\" --ml --task total 2>&1)",
       "PowerShell($env:PYTHONPATH = \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\"; cd \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\"; & \"D:\\\\conda_envs\\\\knee-pipeline\\\\python.exe\" -m scripts.phase1.03_extract_and_mesh --name AB_72Y_Male_Left_Knee 2>&1)",
-      "PowerShell(Start-Process \"D:\\\\3D Slicer 5.10.0\\\\Slicer.exe\" -ArgumentList \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\meshes\\\\AB_72Y_Male_Left_Knee_femur_full.stl\", \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\meshes\\\\AB_72Y_Male_Left_Knee_tibia_full.stl\")"
+      "PowerShell(Start-Process \"D:\\\\3D Slicer 5.10.0\\\\Slicer.exe\" -ArgumentList \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\meshes\\\\AB_72Y_Male_Left_Knee_femur_full.stl\", \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\meshes\\\\AB_72Y_Male_Left_Knee_tibia_full.stl\")",
+      "PowerShell($env:PYTHONPATH = \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\"; Set-Location \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\"; $output = & \"D:\\\\conda_envs\\\\knee-pipeline\\\\python.exe\" -m scripts.phase1.03_extract_and_mesh --name AB_72Y_Male_Left_Knee 2>&1; $output | Out-String)",
+      "PowerShell(Get-ChildItem \"D:\\\\knee-implant-pipeline\\\\knee-implant-pipeline\\\\data\\\\segmentations\\\\phase1\\\\\" -Recurse | Select-Object Name, @{N='SizeMB';E={[math]::Round\\($_.Length/1MB,2\\)}})"
     ]
   }
 }

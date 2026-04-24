@@ -28,7 +28,7 @@ NORM_METHOD      = "zscore"
 
 # Mesh Processing Settings
 MAX_TRIANGLES    = 500_000  # High res for full bones
-SMOOTH_ITERS     = 10       # Light Taubin smoothing
+SMOOTH_ITERS     = 5        # Taubin smoothing — kept low to preserve condyle detail
 TAUBIN_LAMBDA    = 0.5
 TAUBIN_MU        = -0.53
 MAX_HOLE_DIAMETER_MM = 10.0

@@ -108,9 +108,9 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False):
     if not np.any(mask):
         return None
 
-    # Pre-close: bridge narrow shaft gaps and label dropout (ball=3 ≈ 1.5mm at 0.5mm)
-    print(f"    Bridging intra-bone gaps (ball radius=3)...")
-    mask = sk_closing(mask, ball(3)).astype(np.uint8)
+    # Pre-close: bridge shaft gaps and tibial plateau-shaft separation (ball=7 ≈ 3.5mm at 0.5mm)
+    print(f"    Bridging intra-bone gaps (ball radius=7)...")
+    mask = sk_closing(mask, ball(7)).astype(np.uint8)
 
     # Multi-component retention: keep all fragments >= 3% of the largest component.
     # Prevents silently discarding real bone when segmentation has a gap.

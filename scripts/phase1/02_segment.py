@@ -92,29 +92,38 @@ def run_segmentation(volume_name="S0001"):
             ("total", "Standard Total Segmentation (free)")
         ]
 
+    completed_tasks = []
     for task_name, task_desc in tasks_to_try:
         print(f"\n  Running: {task_desc} (task={task_name})...")
+        
+        # Determine output filename for this task
+        # If task is 'total', save as volume_name_total.nii.gz
+        # Otherwise save as volume_name.nii.gz (primary)
+        suffix = "_total" if task_name == "total" else ""
+        task_output_file = output_dir.parent / f"{volume_name}{suffix}.nii.gz"
+        
         try:
             subprocess.run([
                 totalseg_exe,
                 "-i", str(input_file),
-                "-o", str(output_dir),
-                "--ml",               # Multi-label output in a single file
+                "-o", str(task_output_file), # TS can take a file path with --ml
+                "--ml",
                 "--task", task_name,
-                "--quiet"             # Reduce terminal noise
+                "--quiet"
             ], check=True)
             print(f"  [OK] Successfully completed segmentation with task '{task_name}'")
-            return  # Success — stop trying
+            completed_tasks.append(task_name)
         except subprocess.CalledProcessError as e:
             print(f"  [FAILED] Task '{task_name}' failed: {e}")
-            if task_name != tasks_to_try[-1][0]:
-                print(f"  Falling back to next task...")
             continue
         except Exception as e:
-            print(f"  An unexpected error occurred: {e}")
-            return
+            print(f"  An unexpected error occurred during task '{task_name}': {e}")
+            continue
 
-    print(f"Error: All segmentation tasks failed for {volume_name}.")
+    if not completed_tasks:
+        print(f"Error: All segmentation tasks failed for {volume_name}.")
+    else:
+        print(f"\n--- Segmentation Complete for {volume_name} (Tasks: {', '.join(completed_tasks)}) ---")
 
 if __name__ == "__main__":
     import argparse

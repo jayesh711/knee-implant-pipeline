@@ -27,27 +27,30 @@ def ground_truth_reconstruction(name="S0001", threshold=200):
     affine = img.affine
     
     # NEW: Bone-Proximal Filter (Masking noise)
-    # Search for the segmentation file to guide the noise removal
-    seg_potential = [
+    # Search for all segmentation files to guide the noise removal
+    seg_candidates = [
         DATA / "segmentations" / "phase1" / f"{name}.nii",
         DATA / "segmentations" / "phase1" / f"{name}.nii.gz",
+        DATA / "segmentations" / "phase1" / f"{name}_total.nii.gz",
         DATA / "segmentations" / "phase1" / name / "multilabel.nii.gz"
     ]
     
-    clean_mask = None
-    for p in seg_potential:
+    combined_mask = None
+    for p in seg_candidates:
         if p.exists():
-            print(f"  Found segmentation for noise suppression: {p.name}")
+            print(f"  Incorporating segmentation for noise suppression: {p.name}")
             seg_img = nib.load(str(p))
             seg_data = seg_img.get_fdata()
-            # Create a broad bone mask
-            # Dilation increased to 100 (~50mm) to ensure missing bone signal isn't cut off
-            clean_mask = (seg_data > 0).astype(np.uint8)
-            clean_mask = binary_dilation(clean_mask, iterations=100) 
-            break
+            current_mask = (seg_data > 0).astype(np.uint8)
+            if combined_mask is None:
+                combined_mask = current_mask
+            else:
+                combined_mask = np.logical_or(combined_mask, current_mask).astype(np.uint8)
 
-    if clean_mask is not None:
+    if combined_mask is not None:
         print("  Applying generous bone-proximal masking (Full-Leg Restore)...")
+        # Dilation increased to ensure missing bone signal isn't cut off
+        clean_mask = binary_dilation(combined_mask, iterations=100) 
         data[clean_mask == 0] = -1000 # Mask scanner bed but keep bone surroundings
     
     # 1. Simple Thresholding
