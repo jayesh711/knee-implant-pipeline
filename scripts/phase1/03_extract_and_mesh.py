@@ -5,6 +5,7 @@ import pymeshlab
 import json
 from skimage import measure
 from skimage.morphology import closing as sk_closing, ball
+from scipy.ndimage import binary_fill_holes
 from pathlib import Path
 import os
 from config import BASE_DIR, DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN, TAUBIN_LAMBDA, TAUBIN_MU, MAX_HOLE_DIAMETER_MM
@@ -90,16 +91,42 @@ def _find_segmentations(volume_name):
     return result
 
 
+def _get_bbox(mask, margin=15):
+    """Find the bounding box of the non-zero voxels in the mask, with a margin."""
+    coords = np.argwhere(mask)
+    if coords.size == 0:
+        return None
+    min_c = np.maximum(0, coords.min(axis=0) - margin)
+    max_c = np.minimum(mask.shape, coords.max(axis=0) + margin)
+    return min_c, max_c
+
+
 def extract_mesh(mask, affine, raw_data=None, has_metal=False):
     """
     Generate a clean, full-length bone mesh from a binary voxel mask.
-
-    mask:      uint8 binary array in segmentation voxel space.
-    affine:    4x4 voxel-to-LPS-mm transform from the segmentation NIfTI.
-    raw_data:  HU array (same shape) for optional metal filtering.
-    has_metal: enable surgical hardware filter (post-op cases only, opt-in).
+    Optimized with spatial cropping for large volumes.
     """
     mask = mask.copy()
+
+    # Spatial Cropping Optimization
+    print(f"    Analyzing bone extent for spatial optimization...")
+    bbox = _get_bbox(mask)
+    if bbox:
+        min_c, max_c = bbox
+        print(f"    Cropping to region: {min_c} -> {max_c} (Shape: {max_c - min_c})")
+        
+        # Crop mask and raw data
+        mask = mask[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
+        if raw_data is not None:
+            raw_data = raw_data[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
+            
+        # Update affine for the new origin
+        new_affine = affine.copy()
+        new_affine[:3, 3] = affine[:3, :3] @ min_c + affine[:3, 3]
+        affine = new_affine
+    else:
+        print(f"    Warning: Mask is empty, skipping extraction.")
+        return None
 
     if has_metal and raw_data is not None:
         print(f"    Filtering hardware (>{_METAL_THRESHOLD} HU)...")
@@ -108,23 +135,24 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False):
     if not np.any(mask):
         return None
 
-    # Pre-close: bridge shaft gaps and tibial plateau-shaft separation (ball=7 ≈ 3.5mm at 0.5mm)
-    print(f"    Bridging intra-bone gaps (ball radius=7)...")
-    mask = sk_closing(mask, ball(7)).astype(np.uint8)
+    # Pre-close: bridge shaft gaps and tibial plateau-shaft separation (ball=12 ≈ 6mm at 0.5mm)
+    print(f"    Bridging intra-bone gaps (ball radius=12)...")
+    mask = sk_closing(mask, ball(12)).astype(np.uint8)
 
-    # Multi-component retention: keep all fragments >= 3% of the largest component.
+    # Multi-component retention: keep all fragments >= 1% of the largest component.
     # Prevents silently discarding real bone when segmentation has a gap.
     comp_arr = measure.label(mask)
     n_comps = comp_arr.max()
     if n_comps > 1:
         counts = np.bincount(comp_arr.flat)[1:]
         largest = counts.max()
-        kept_ids = np.where(counts >= 0.03 * largest)[0] + 1
-        print(f"    Retained {len(kept_ids)}/{n_comps} components (>= 3% of {largest:,} voxels)")
+        kept_ids = np.where(counts >= 0.01 * largest)[0] + 1
+        print(f"    Retained {len(kept_ids)}/{n_comps} components (>= 1% of {largest:,} voxels)")
         mask = np.isin(comp_arr, kept_ids).astype(np.uint8)
 
-    # Internal void closing (marrow spaces)
-    mask = sk_closing(mask, ball(1)).astype(np.uint8)
+    # Internal void closing (marrow spaces) - Robust 3D fill
+    print(f"    Filling internal voids (marrow)...")
+    mask = binary_fill_holes(mask).astype(np.uint8)
 
     if not np.any(mask):
         return None

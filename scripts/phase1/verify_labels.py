@@ -33,11 +33,12 @@ def verify_labels(volume_name="S0001"):
     # 24: Femur left, 25: Femur right, 26: Tibia left, 27: Tibia right
     bone_labels = {24: "Femur Left", 25: "Femur Right", 26: "Tibia Left", 27: "Tibia Right"}
     
-    print("\nIdentified Bone Structures:")
-    found_bones = False
+    print("\nLabel Statistics:")
     for label_id in unique_labels:
+        count = int((data == label_id).sum())
+        name = bone_labels.get(label_id, "Unknown")
+        print(f"  ID {label_id:2}: {count:10,} voxels ({name})")
         if label_id in bone_labels:
-            print(f"  ID {label_id}: {bone_labels[label_id]}")
             found_bones = True
             
     if not found_bones:

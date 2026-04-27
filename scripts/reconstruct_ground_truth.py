@@ -7,6 +7,15 @@ from pathlib import Path
 import argparse
 from config import DATA
 
+def _get_bbox(mask, margin=50):
+    """Find the bounding box of the non-zero voxels in the mask, with a margin."""
+    coords = np.argwhere(mask)
+    if coords.size == 0:
+        return None
+    min_c = np.maximum(0, coords.min(axis=0) - margin)
+    max_c = np.minimum(mask.shape, coords.max(axis=0) + margin)
+    return min_c, max_c
+
 def ground_truth_reconstruction(name="S0001", threshold=200):
     """
     Generate a 'Pure Signal' baseline reconstruction from raw HU data.
@@ -49,6 +58,22 @@ def ground_truth_reconstruction(name="S0001", threshold=200):
 
     if combined_mask is not None:
         print("  Applying generous bone-proximal masking (Full-Leg Restore)...")
+        
+        # Spatial Cropping Optimization
+        bbox = _get_bbox(combined_mask)
+        if bbox:
+            min_c, max_c = bbox
+            print(f"  Cropping to bone region: {min_c} -> {max_c} (Shape: {max_c - min_c})")
+            
+            # Crop data and mask
+            data = data[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
+            combined_mask = combined_mask[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
+            
+            # Update affine
+            new_affine = affine.copy()
+            new_affine[:3, 3] = affine[:3, :3] @ min_c + affine[:3, 3]
+            affine = new_affine
+
         # Dilation increased to ensure missing bone signal isn't cut off
         clean_mask = binary_dilation(combined_mask, iterations=100) 
         data[clean_mask == 0] = -1000 # Mask scanner bed but keep bone surroundings

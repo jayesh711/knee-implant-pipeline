@@ -17,6 +17,7 @@ MIN_BONE_VOLUME_CC = 100.0  # Threshold for bone detection
 # HU thresholds (Clinical CT Values)
 HU_CORTICAL_MIN  = 700
 HU_SPONGY_MAX    = 300
+HU_BONE_MIN      = 150      # Broad bone signal including spongy/osteopenic
 HU_CANAL_MAX     = 400
 HU_METAL_MIN     = 2500     # Surgical hardware threshold
 
@@ -32,6 +33,9 @@ SMOOTH_ITERS     = 5        # Taubin smoothing — kept low to preserve condyle 
 TAUBIN_LAMBDA    = 0.5
 TAUBIN_MU        = -0.53
 MAX_HOLE_DIAMETER_MM = 10.0
+FEMUR_HEAD_RATIO_MIN = 1.5
+FEMUR_HEAD_RATIO_MAX = 1.8
+SHAFT_BRIDGE_MARGIN_MM = 15.0 # How much to overlap the bridge with the fragments
 
 # Preprocessing Settings
 DEFAULT_SPACING     = (0.5, 0.5, 0.5)  # 0.5mm isotropic
