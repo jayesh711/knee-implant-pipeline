@@ -4,8 +4,8 @@ import trimesh
 import pymeshlab
 import json
 from skimage import measure
-from skimage.morphology import closing as sk_closing, ball
-from scipy.ndimage import binary_fill_holes
+from skimage.morphology import ball
+from scipy.ndimage import binary_fill_holes, binary_closing as scipy_binary_closing
 from pathlib import Path
 import os
 from config import BASE_DIR, DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN, TAUBIN_LAMBDA, TAUBIN_MU, MAX_HOLE_DIAMETER_MM
@@ -101,10 +101,14 @@ def _get_bbox(mask, margin=15):
     return min_c, max_c
 
 
-def extract_mesh(mask, affine, raw_data=None, has_metal=False):
+def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_radius=12):
     """
     Generate a clean, full-length bone mesh from a binary voxel mask.
     Optimized with spatial cropping for large volumes.
+
+    closing_radius: ball radius for morphological closing before marching cubes.
+      femur uses 20 (bridges femoral neck gaps up to ~10mm),
+      tibia uses 12 (bridges plateau-shaft gaps up to ~6mm).
     """
     mask = mask.copy()
 
@@ -135,9 +139,10 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False):
     if not np.any(mask):
         return None
 
-    # Pre-close: bridge shaft gaps and tibial plateau-shaft separation (ball=12 ≈ 6mm at 0.5mm)
-    print(f"    Bridging intra-bone gaps (ball radius=12)...")
-    mask = sk_closing(mask, ball(12)).astype(np.uint8)
+    # Pre-close: bridge segmentation gaps (femoral neck or tibial plateau-shaft junction).
+    # scipy binary_closing uses boolean dtype (~8x less memory than skimage's float64 closing).
+    print(f"    Bridging intra-bone gaps (ball radius={closing_radius})...")
+    mask = scipy_binary_closing(mask, structure=ball(closing_radius)).astype(np.uint8)
 
     # Multi-component retention: keep all fragments >= 1% of the largest component.
     # Prevents silently discarding real bone when segmentation has a gap.
@@ -222,7 +227,9 @@ def process_volume(volume_name="S0001", has_metal=False):
 
     def _load(path):
         img = nib.load(str(path))
-        return img.get_fdata().astype(np.int32), img.affine
+        # float32 avoids the default float64 allocation; uint8 is sufficient for all
+        # segmentation labels (TotalSegmentator v2 max label < 200) and 4x smaller than int32.
+        return img.get_fdata(dtype=np.float32).astype(np.uint8), img.affine
 
     def _build_mask(seg_data, label_ids):
         m = np.zeros(seg_data.shape, dtype=np.uint8)
@@ -284,12 +291,17 @@ def process_volume(volume_name="S0001", has_metal=False):
     output_dir = DATA / "meshes"
     os.makedirs(output_dir, exist_ok=True)
 
+    # Femur uses a larger closing radius to bridge femoral neck gaps (~10mm).
+    # Tibia uses a smaller radius to avoid merging unrelated structures.
+    closing_radii = {"femur": 15, "tibia": 12}
+
     for bone_name, mask, affine in [
         ("femur", femur_mask, femur_affine),
         ("tibia", tibia_mask, tibia_affine),
     ]:
         print(f"\nProcessing {bone_name.upper()} ({int(np.sum(mask)):,} voxels)...")
-        mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal)
+        mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal,
+                            closing_radius=closing_radii[bone_name])
         if mesh is not None:
             out_path = output_dir / f"{volume_name}_{bone_name}_full.stl"
             mesh.export(str(out_path))
@@ -308,9 +320,11 @@ def _export_bone(volume_name, bone_name, mask, affine, has_metal):
 
     output_dir = DATA / "meshes"
     os.makedirs(output_dir, exist_ok=True)
+    closing_radius = 15 if bone_name == "femur" else 12
 
     print(f"\nProcessing {bone_name.upper()} ({int(np.sum(mask)):,} voxels)...")
-    mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal)
+    mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal,
+                        closing_radius=closing_radius)
     if mesh is not None:
         out_path = output_dir / f"{volume_name}_{bone_name}_full.stl"
         mesh.export(str(out_path))

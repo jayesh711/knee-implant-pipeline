@@ -65,8 +65,10 @@ def apply_intensity_discretization(image, bin_width=HU_BIN_WIDTH):
         return image
     
     arr = sitk.GetArrayFromImage(image).astype(np.float32)
-    # Binning: floor(val / width) * width
-    arr = np.floor(arr / bin_width) * bin_width
+    # Binning in-place to avoid peak memory from temporary arrays
+    arr /= bin_width
+    np.floor(arr, out=arr)
+    arr *= bin_width
     
     discretized_image = sitk.GetImageFromArray(arr)
     discretized_image.CopyInformation(image)
