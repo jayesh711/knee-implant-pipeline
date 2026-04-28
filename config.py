@@ -29,13 +29,23 @@ NORM_METHOD      = "zscore"
 
 # Mesh Processing Settings
 MAX_TRIANGLES    = 500_000  # High res for full bones
-SMOOTH_ITERS     = 5        # Taubin smoothing — kept low to preserve condyle detail
+SMOOTH_ITERS     = 30       # Taubin smoothing — clinical grade surface quality
 TAUBIN_LAMBDA    = 0.5
 TAUBIN_MU        = -0.53
-MAX_HOLE_DIAMETER_MM = 10.0
+MAX_HOLE_DIAMETER_MM = 20.0  # Close real gaps; kept below 30 to preserve intercondylar notch
 FEMUR_HEAD_RATIO_MIN = 1.5
 FEMUR_HEAD_RATIO_MAX = 1.8
 SHAFT_BRIDGE_MARGIN_MM = 15.0 # How much to overlap the bridge with the fragments
+
+# Adaptive Morphological Closing (physical mm, not voxel counts)
+CLOSING_MM_FEMUR = 3.0       # Bridge intra-bone gaps without crossing joint (was ball(15)=7.5mm)
+CLOSING_MM_TIBIA = 2.0       # Tighter for tibia to avoid merging structures (was ball(12)=6mm)
+
+# Joint Gap Enforcement
+JOINT_GAP_MM     = 3.0       # Minimum maintained gap between femur/tibia surfaces
+
+# Component Filtering
+COMPONENT_MIN_PCT = 5.0      # Keep components >= 5% of largest (was 1% — too noisy)
 
 # Preprocessing Settings
 DEFAULT_SPACING     = (0.5, 0.5, 0.5)  # 0.5mm isotropic

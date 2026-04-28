@@ -74,22 +74,29 @@ def ground_truth_reconstruction(name="S0001", threshold=200):
             new_affine[:3, 3] = affine[:3, :3] @ min_c + affine[:3, 3]
             affine = new_affine
 
-        # Dilation increased to ensure missing bone signal isn't cut off
-        clean_mask = binary_dilation(combined_mask, iterations=100) 
+        # Dilation: 15 iterations (~7.5mm margin at 0.5mm spacing)
+        # Keeps bone surroundings without ballooning into scanner bed/soft tissue.
+        clean_mask = binary_dilation(combined_mask, iterations=15) 
         data[clean_mask == 0] = -1000 # Mask scanner bed but keep bone surroundings
     
     # 1. Simple Thresholding
     mask = (data > threshold).astype(np.uint8)
     
-    # 2. Connected Component Analysis (Keep largest structures)
-    print("  Isolating main bone structures...")
+    # 2. Connected Component Analysis — Volume-Based Filter
+    # Keep only components with volume > 50,000 voxels (~6.25 cm³ at 0.5mm spacing).
+    # This is more robust than top-N: handles patella, fragmented femur, etc.
+    MIN_COMPONENT_VOXELS = 50_000
+    print(f"  Isolating bone structures (min volume: {MIN_COMPONENT_VOXELS:,} voxels)...")
     labels = measure.label(mask)
     regions = measure.regionprops(labels)
-    regions.sort(key=lambda x: x.area, reverse=True)
     
     final_mask = np.zeros_like(mask)
-    for r in regions[:15]: # Keep up to 15 largest components
-        final_mask[labels == r.label] = 1
+    kept_count = 0
+    for r in regions:
+        if r.area >= MIN_COMPONENT_VOXELS:
+            final_mask[labels == r.label] = 1
+            kept_count += 1
+    print(f"  Retained {kept_count}/{len(regions)} components (>= {MIN_COMPONENT_VOXELS:,} voxels)")
     
     if np.sum(final_mask) == 0:
         print("Warning: No bone detected at this threshold!")

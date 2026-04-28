@@ -1,14 +1,23 @@
 import nibabel as nib
 import numpy as np
 import trimesh
+import trimesh.repair
 import pymeshlab
 import json
 from skimage import measure
 from skimage.morphology import ball
-from scipy.ndimage import binary_fill_holes, binary_closing as scipy_binary_closing
+from scipy.ndimage import (
+    binary_fill_holes,
+    binary_closing as scipy_binary_closing,
+    distance_transform_edt,
+)
 from pathlib import Path
 import os
-from config import BASE_DIR, DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN, TAUBIN_LAMBDA, TAUBIN_MU, MAX_HOLE_DIAMETER_MM
+from config import (
+    BASE_DIR, DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN,
+    TAUBIN_LAMBDA, TAUBIN_MU, MAX_HOLE_DIAMETER_MM,
+    CLOSING_MM_FEMUR, CLOSING_MM_TIBIA, JOINT_GAP_MM, COMPONENT_MIN_PCT,
+)
 
 # Metal filter is opt-in (has_metal=True only). Raw CT is clamped to 3000 HU at ingest,
 # so HU_METAL_MIN (2500) is only safe to apply when an implant is confirmed present.
@@ -101,14 +110,42 @@ def _get_bbox(mask, margin=15):
     return min_c, max_c
 
 
-def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_radius=12):
+def _voxel_size_from_affine(affine):
+    """Compute the isotropic voxel size (mm) from the affine matrix."""
+    return np.cbrt(np.abs(np.linalg.det(affine[:3, :3])))
+
+
+# ── Joint Gap Enforcement ─────────────────────────────────────────────────────
+def enforce_joint_gap(femur_mask, tibia_mask, min_gap_voxels=4):
+    """
+    Ensure a minimum physical gap between femur and tibia masks.
+    Uses distance_transform_edt to compute the distance of every voxel
+    of one bone from the boundary of the other. Voxels closer than
+    min_gap_voxels are removed.
+
+    At 0.5mm spacing, min_gap_voxels=4 → 2mm physical gap.
+    At 0.5mm spacing, min_gap_voxels=6 → 3mm physical gap.
+    """
+    # Compute distance of every femur voxel from tibia boundary
+    # and vice versa. Where distance < min_gap, erode that bone.
+    femur_dist = distance_transform_edt(~tibia_mask.astype(bool))
+    tibia_dist = distance_transform_edt(~femur_mask.astype(bool))
+
+    # Remove femur voxels too close to tibia
+    femur_mask = femur_mask & (femur_dist >= min_gap_voxels)
+    # Remove tibia voxels too close to femur
+    tibia_mask = tibia_mask & (tibia_dist >= min_gap_voxels)
+
+    return femur_mask.astype(np.uint8), tibia_mask.astype(np.uint8)
+
+
+def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0):
     """
     Generate a clean, full-length bone mesh from a binary voxel mask.
     Optimized with spatial cropping for large volumes.
 
-    closing_radius: ball radius for morphological closing before marching cubes.
-      femur uses 20 (bridges femoral neck gaps up to ~10mm),
-      tibia uses 12 (bridges plateau-shaft gaps up to ~6mm).
+    closing_mm: morphological closing radius in physical mm.
+      Converted to voxels using the affine. Default 3mm for femur, 2mm for tibia.
     """
     mask = mask.copy()
 
@@ -118,12 +155,12 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_radius=12
     if bbox:
         min_c, max_c = bbox
         print(f"    Cropping to region: {min_c} -> {max_c} (Shape: {max_c - min_c})")
-        
+
         # Crop mask and raw data
         mask = mask[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
         if raw_data is not None:
             raw_data = raw_data[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
-            
+
         # Update affine for the new origin
         new_affine = affine.copy()
         new_affine[:3, 3] = affine[:3, :3] @ min_c + affine[:3, 3]
@@ -139,20 +176,27 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_radius=12
     if not np.any(mask):
         return None
 
-    # Pre-close: bridge segmentation gaps (femoral neck or tibial plateau-shaft junction).
+    # Adaptive closing: convert physical mm to voxel radius
+    voxel_size = _voxel_size_from_affine(affine)
+    closing_radius = max(1, int(round(closing_mm / voxel_size)))
+    print(f"    Bridging intra-bone gaps (closing={closing_mm}mm → ball radius={closing_radius} voxels at {voxel_size:.2f}mm/vox)...")
+
     # scipy binary_closing uses boolean dtype (~8x less memory than skimage's float64 closing).
-    print(f"    Bridging intra-bone gaps (ball radius={closing_radius})...")
     mask = scipy_binary_closing(mask, structure=ball(closing_radius)).astype(np.uint8)
 
-    # Multi-component retention: keep all fragments >= 1% of the largest component.
-    # Prevents silently discarding real bone when segmentation has a gap.
+    # Multi-component retention: keep only components with volume >= 50,000 voxels
+    # (~6.25 cm³ at 0.5mm spacing). Volume-based filter is more robust than
+    # percentage-based — doesn't depend on the size of the largest component.
+    MIN_COMPONENT_VOXELS = 50_000
     comp_arr = measure.label(mask)
     n_comps = comp_arr.max()
     if n_comps > 1:
         counts = np.bincount(comp_arr.flat)[1:]
-        largest = counts.max()
-        kept_ids = np.where(counts >= 0.01 * largest)[0] + 1
-        print(f"    Retained {len(kept_ids)}/{n_comps} components (>= 1% of {largest:,} voxels)")
+        kept_ids = np.where(counts >= MIN_COMPONENT_VOXELS)[0] + 1
+        if len(kept_ids) == 0:
+            # Fallback: if no component reaches 50k, keep the largest
+            kept_ids = [np.argmax(counts) + 1]
+        print(f"    Retained {len(kept_ids)}/{n_comps} components (>= {MIN_COMPONENT_VOXELS:,} voxels)")
         mask = np.isin(comp_arr, kept_ids).astype(np.uint8)
 
     # Internal void closing (marrow spaces) - Robust 3D fill
@@ -169,20 +213,33 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_radius=12
     # Voxel → LPS mm
     world_verts = (affine[:3, :3] @ verts.T).T + affine[:3, 3]
 
-    # PyMeshLab clinical refinement
+    # ── Mesh Refinement Pipeline ──────────────────────────────────────────────
+    # Step 1: Trimesh hole-fill first (handles topologically complex holes that
+    # PyMeshLab fails silently on)
+    print(f"    Trimesh hole-fill pass...")
+    tri_mesh = trimesh.Trimesh(vertices=world_verts, faces=faces)
+    trimesh.repair.fill_holes(tri_mesh)
+    trimesh.repair.fix_normals(tri_mesh)
+
+    # Step 2: PyMeshLab clinical refinement
     print(f"    PyMeshLab refinement...")
     ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(world_verts, faces))
+    ms.add_mesh(pymeshlab.Mesh(tri_mesh.vertices, tri_mesh.faces))
 
     ms.apply_filter("meshing_remove_duplicate_vertices")
     ms.apply_filter("meshing_remove_duplicate_faces")
 
+    # PyMeshLab hole-fill as second pass (catches remaining holes after trimesh)
     try:
-        voxel_size = np.cbrt(np.abs(np.linalg.det(affine[:3, :3])))
         max_edges = int(MAX_HOLE_DIAMETER_MM / voxel_size)
         ms.apply_filter("meshing_close_holes", maxholesize=max_edges)
     except Exception as e:
-        print(f"    Warning: Hole filling skipped ({e})")
+        print(f"    Warning: PyMeshLab hole filling skipped ({e})")
+
+    # Laplacian pre-smooth: one pass to kill the worst staircase artifacts
+    # before Taubin preserves the anatomy
+    print(f"    Laplacian pre-smooth (1 iteration)...")
+    ms.apply_coord_laplacian_smoothing(stepsmoothnum=1)
 
     print(f"    Taubin smoothing ({SMOOTH_ITERS} iterations)...")
     ms.apply_coord_taubin_smoothing(
@@ -209,6 +266,9 @@ def process_volume(volume_name="S0001", has_metal=False):
 
     Falls back to SI-vector split if only one segmentation is available and
     contains both femur and tibia labels.
+
+    After extraction, enforces a minimum joint gap between femur and tibia
+    using distance_transform_edt to prevent anatomical fusion.
     """
     seg_paths = _find_segmentations(volume_name)
 
@@ -277,10 +337,28 @@ def process_volume(volume_name="S0001", has_metal=False):
         available_affine = femur_affine if femur_affine is not None else tibia_affine
         bone_name = "femur" if femur_mask is not None else "tibia"
         print(f"\n  Only {bone_name} found — exporting single bone.")
-        _export_bone(volume_name, bone_name, available_mask, available_affine, has_metal)
+        closing_mm = CLOSING_MM_FEMUR if bone_name == "femur" else CLOSING_MM_TIBIA
+        _export_bone(volume_name, bone_name, available_mask, available_affine, has_metal, closing_mm)
         return
 
-    # ── Both bones found — export independently ───────────────────────────────
+    # ── Both bones found — enforce joint gap, then export independently ───────
+    # Joint gap enforcement BEFORE mesh extraction (operates on voxel masks).
+    # Ensures femur and tibia don't fuse at the knee joint.
+    voxel_size = _voxel_size_from_affine(femur_affine)
+    min_gap_voxels = max(1, int(round(JOINT_GAP_MM / voxel_size)))
+    print(f"\n  Enforcing joint gap: {JOINT_GAP_MM}mm → {min_gap_voxels} voxels at {voxel_size:.2f}mm/vox")
+
+    # Both masks must be in the same coordinate space for gap enforcement.
+    # They share the same grid when from the same segmentation file, or when
+    # both segmentations were produced from the same _raw.nii.gz (same affine/shape).
+    if np.array_equal(femur_affine, tibia_affine) and femur_mask.shape == tibia_mask.shape:
+        femur_mask, tibia_mask = enforce_joint_gap(femur_mask, tibia_mask, min_gap_voxels)
+        print(f"  Joint gap enforced. Femur: {int(np.sum(femur_mask)):,}  Tibia: {int(np.sum(tibia_mask)):,} voxels")
+    else:
+        print(f"  Warning: Masks from different grids — joint gap enforcement skipped.")
+        print(f"    (femur affine == tibia affine: {np.array_equal(femur_affine, tibia_affine)}, "
+              f"shapes: {femur_mask.shape} vs {tibia_mask.shape})")
+
     raw_data = None
     if has_metal:
         raw_path = DATA / "NIfTI" / f"{volume_name}_raw.nii.gz"
@@ -291,9 +369,8 @@ def process_volume(volume_name="S0001", has_metal=False):
     output_dir = DATA / "meshes"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Femur uses a larger closing radius to bridge femoral neck gaps (~10mm).
-    # Tibia uses a smaller radius to avoid merging unrelated structures.
-    closing_radii = {"femur": 15, "tibia": 12}
+    # Adaptive closing radii in physical mm (converted to voxels inside extract_mesh)
+    closing_mm_map = {"femur": CLOSING_MM_FEMUR, "tibia": CLOSING_MM_TIBIA}
 
     for bone_name, mask, affine in [
         ("femur", femur_mask, femur_affine),
@@ -301,7 +378,7 @@ def process_volume(volume_name="S0001", has_metal=False):
     ]:
         print(f"\nProcessing {bone_name.upper()} ({int(np.sum(mask)):,} voxels)...")
         mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal,
-                            closing_radius=closing_radii[bone_name])
+                            closing_mm=closing_mm_map[bone_name])
         if mesh is not None:
             out_path = output_dir / f"{volume_name}_{bone_name}_full.stl"
             mesh.export(str(out_path))
@@ -309,8 +386,11 @@ def process_volume(volume_name="S0001", has_metal=False):
         else:
             print(f"  [WARN] No mesh produced for {bone_name}.")
 
+    # ── Automatic gap verification ────────────────────────────────────────────
+    _verify_gap(volume_name, output_dir)
 
-def _export_bone(volume_name, bone_name, mask, affine, has_metal):
+
+def _export_bone(volume_name, bone_name, mask, affine, has_metal, closing_mm=3.0):
     """Extract and export a single bone mesh."""
     raw_data = None
     if has_metal:
@@ -320,17 +400,55 @@ def _export_bone(volume_name, bone_name, mask, affine, has_metal):
 
     output_dir = DATA / "meshes"
     os.makedirs(output_dir, exist_ok=True)
-    closing_radius = 15 if bone_name == "femur" else 12
 
     print(f"\nProcessing {bone_name.upper()} ({int(np.sum(mask)):,} voxels)...")
     mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal,
-                        closing_radius=closing_radius)
+                        closing_mm=closing_mm)
     if mesh is not None:
         out_path = output_dir / f"{volume_name}_{bone_name}_full.stl"
         mesh.export(str(out_path))
         print(f"  [OK] {out_path.name}  ({len(mesh.faces):,} faces)")
     else:
         print(f"  [WARN] No mesh produced for {bone_name}.")
+
+
+def _verify_gap(volume_name, mesh_dir):
+    """Quick post-processing check: measure surface-to-surface gap between femur and tibia."""
+    femur_path = mesh_dir / f"{volume_name}_femur_full.stl"
+    tibia_path = mesh_dir / f"{volume_name}_tibia_full.stl"
+
+    if not femur_path.exists() or not tibia_path.exists():
+        print("\n  [GAP CHECK] Skipped — both meshes required.")
+        return
+
+    try:
+        femur_mesh = trimesh.load(str(femur_path))
+        tibia_mesh = trimesh.load(str(tibia_path))
+
+        # Sample points on tibia surface, query closest point on femur
+        tibia_samples = tibia_mesh.sample(5000)
+        _, dist, _ = trimesh.proximity.closest_point(femur_mesh, tibia_samples)
+
+        min_gap = dist.min()
+        mean_gap = dist.mean()
+        print(f"\n  [GAP CHECK] Min gap: {min_gap:.2f}mm | Mean gap: {mean_gap:.2f}mm")
+        if min_gap < 1.5:
+            print(f"  [GAP CHECK] WARNING: Min gap < 1.5mm — bones may appear fused!")
+        else:
+            print(f"  [GAP CHECK] PASS: Adequate joint space maintained.")
+
+        # Log to CSV for consistency tracking
+        csv_path = DATA / "gap_measurements.csv"
+        write_header = not csv_path.exists()
+        with open(csv_path, "a") as f:
+            if write_header:
+                f.write("patient,min_gap_mm,mean_gap_mm,status\n")
+            status = "PASS" if min_gap >= 1.5 else "FAIL"
+            f.write(f"{volume_name},{min_gap:.2f},{mean_gap:.2f},{status}\n")
+        print(f"  [GAP CHECK] Logged to {csv_path}")
+
+    except Exception as e:
+        print(f"\n  [GAP CHECK] Error during gap measurement: {e}")
 
 
 if __name__ == "__main__":
