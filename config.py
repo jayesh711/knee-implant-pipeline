@@ -28,7 +28,7 @@ HU_BIN_WIDTH     = 25       # 25 HU steps
 NORM_METHOD      = "zscore"
 
 # Mesh Processing Settings
-MAX_TRIANGLES    = 500_000  # High res for full bones
+MAX_TRIANGLES    = 120_000  # Clinical standard for bone meshes (80-120k faces)
 SMOOTH_ITERS     = 30       # Taubin smoothing — clinical grade surface quality
 TAUBIN_LAMBDA    = 0.5
 TAUBIN_MU        = -0.53
@@ -38,8 +38,9 @@ FEMUR_HEAD_RATIO_MAX = 1.8
 SHAFT_BRIDGE_MARGIN_MM = 15.0 # How much to overlap the bridge with the fragments
 
 # Adaptive Morphological Closing (physical mm, not voxel counts)
-CLOSING_MM_FEMUR = 3.0       # Bridge intra-bone gaps without crossing joint (was ball(15)=7.5mm)
-CLOSING_MM_TIBIA = 2.0       # Tighter for tibia to avoid merging structures (was ball(12)=6mm)
+CLOSING_MM_FEMUR = 1.5       # Bridge intra-bone gaps without crossing joint (Fix #2)
+CLOSING_MM_TIBIA = 1.5       # Match femur for consistent gap maintenance
+
 
 # Joint Gap Enforcement
 JOINT_GAP_MM     = 3.0       # Minimum maintained gap between femur/tibia surfaces
