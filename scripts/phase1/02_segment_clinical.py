@@ -13,9 +13,9 @@ sys.path.append(str(BASE_DIR))
 
 from config import DATA, HU_BONE_MIN
 
-# JPlanner Specific Constants
-STAGE1_MODEL_PATH = BASE_DIR / "models" / "jplanner_tka" / "stage1" / "model.onnx"
-STAGE2_MODEL_PATH = BASE_DIR / "models" / "jplanner_tka" / "stage2" / "model.onnx"
+# Precision Specific Constants
+STAGE1_MODEL_PATH = BASE_DIR / "models" / "clinical_tka" / "stage1" / "model.onnx"
+STAGE2_MODEL_PATH = BASE_DIR / "models" / "clinical_tka" / "stage2" / "model.onnx"
 INPUT_SHAPE = (192, 112, 112)  # (Depth, Height, Width)
 CLIP_RANGE = (-200, 1000)
 
@@ -59,7 +59,7 @@ def run_inference(session, input_data):
     outputs = session.run(None, {input_name: input_data})
     
     # outputs[0] shape: [1, 3, 192, 112, 112]
-    # Channels: 0=BG, 1=Femur, 2=Tibia (Standard JPlanner)
+    # Channels: 0=BG, 1=Femur, 2=Tibia (Standard Precision)
     softmax_out = outputs[0][0]
     labels = np.argmax(softmax_out, axis=0).astype(np.uint8)
     return labels
@@ -92,10 +92,10 @@ def get_bounding_box(mask, padding_mm=25.0, spacing=(1.0, 1.0, 1.0)):
     
     return start, size
 
-def segment_jplanner(volume_name):
-    print(f"\n--- JPlanner-A Segmentation Engine: {volume_name} ---")
+def segment_clinical(volume_name):
+    print(f"\n--- Precision-A Segmentation Engine: {volume_name} ---")
     input_path = DATA / "NIfTI" / f"{volume_name}_raw.nii.gz"
-    output_path = DATA / "segmentations" / "phase1" / f"{volume_name}_jplanner.nii.gz"
+    output_path = DATA / "segmentations" / "phase1" / f"{volume_name}_clinical.nii.gz"
     
     if not input_path.exists():
         print(f"  [ERROR] Input {input_path} not found.")
@@ -210,7 +210,7 @@ def segment_jplanner(volume_name):
         femur_v = counts[1] if len(counts) > 1 else 0
         tibia_v = counts[2] if len(counts) > 2 else 0
         print(f"    Voxel Counts: Femur={femur_v:,}, Tibia={tibia_v:,}")
-        print(f"  [SUCCESS] JPlanner-A segmentation saved to: {output_path.name}")
+        print(f"  [SUCCESS] Precision-A segmentation saved to: {output_path.name}")
         
     except Exception as e:
         print(f"  [ERROR] Segmentation failed: {e}")
@@ -218,8 +218,8 @@ def segment_jplanner(volume_name):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run JPlanner-A TKA segmentation pipeline")
+    parser = argparse.ArgumentParser(description="Run Precision-A TKA segmentation pipeline")
     parser.add_argument("--name", type=str, default="AB_72Y_Male_Left", help="Volume name")
     args = parser.parse_args()
     
-    segment_jplanner(args.name)
+    segment_clinical(args.name)

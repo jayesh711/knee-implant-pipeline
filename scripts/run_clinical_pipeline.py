@@ -9,7 +9,7 @@ def run_command(cmd_list):
     subprocess.run(cmd_list, check=True)
 
 def main():
-    parser = argparse.ArgumentParser(description="Run full JPlanner-A clinical pipeline for a patient CT.")
+    parser = argparse.ArgumentParser(description="Run full Precision-A clinical pipeline for a patient CT.")
     parser.add_argument("dicom_path", type=str, help="Path to the folder containing DICOM files")
     parser.add_argument("--name", type=str, required=True, help="Patient/Volume name for outputs")
     parser.add_argument("--has-metal", action="store_true", help="Enable HU-based hardware filtering")
@@ -24,7 +24,7 @@ def main():
         sys.exit(1)
         
     print(f"\n" + "="*70)
-    print(f" JPLANNER-A END-TO-END CLINICAL PIPELINE: {name}")
+    print(f" CLINICAL-A END-TO-END CLINICAL PIPELINE: {name}")
     print(f" INPUT: {dicom_path}")
     print("="*70)
     
@@ -39,9 +39,9 @@ def main():
         print("\n[PHASE 1] Ingestion and Clinical Prep (PURE mode for high-fidelity native resolution)...")
         run_command([python_exe, "-m", "scripts.ingest_dicom", str(dicom_path), "--name", name, "--pure"])
         
-        # 2. AI Segmentation (JPlanner-A ONNX)
-        print("\n[PHASE 2] AI Segmentation (JPlanner-A Two-Stage)...")
-        run_command([python_exe, "-m", "scripts.phase1.02_segment_jplanner", "--name", name])
+        # 2. AI Segmentation (Precision-A ONNX)
+        print("\n[PHASE 2] AI Segmentation (Precision-A Two-Stage)...")
+        run_command([python_exe, "-m", "scripts.phase1.02_segment_clinical", "--name", name])
         
         # 3. 3D Mesh Reconstruction (High-Quality Extraction)
         print("\n[PHASE 3] 3D Mesh Reconstruction...")

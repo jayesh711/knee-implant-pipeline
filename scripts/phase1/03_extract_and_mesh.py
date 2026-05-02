@@ -69,10 +69,10 @@ def _detect_bone_labels(seg_data, task_hint=""):
 
     max_label = max(present)
 
-    if "jplanner" in task_hint.lower():
+    if "clinical" in task_hint.lower():
         femur_ids = [1] if 1 in present else []
         tibia_ids = [2] if 2 in present else []
-        task = "jplanner"
+        task = "clinical"
     elif max_label <= 20 and _APPENDICULAR_DATASET_JSON.exists():
         with open(_APPENDICULAR_DATASET_JSON) as f:
             raw = json.load(f)["labels"]
@@ -118,13 +118,13 @@ def _find_segmentations(volume_name):
     if found_total:
         result["total"] = found_total
 
-    # 3. JPlanner-A (New pure-python integration)
-    jplanner_candidates = [
-        phase1 / f"{volume_name}_jplanner.nii.gz",
+    # 3. Precision-A (New pure-python integration)
+    clinical_candidates = [
+        phase1 / f"{volume_name}_clinical.nii.gz",
     ]
-    found_jplanner = next((p for p in jplanner_candidates if p.exists()), None)
-    if found_jplanner:
-        result["jplanner"] = found_jplanner
+    found_clinical = next((p for p in clinical_candidates if p.exists()), None)
+    if found_clinical:
+        result["clinical"] = found_clinical
 
     return result
 
@@ -471,7 +471,7 @@ def _cap_open_boundaries(mesh, max_loop_size=400):
 
 
 
-def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, bone_name="bone", is_jplanner=False):
+def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, bone_name="bone", is_clinical=False):
     """
     High-quality mesh extraction using Anti-Aliased Marching Cubes 
     via Distance Transform + Gaussian Blur (V2 logic).
@@ -505,7 +505,7 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, b
     mask = binary_fill_holes(mask).astype(np.uint8)
 
     # Multi-component retention (removes floating artifacts)
-    # FOR JPLANNER: We keep only the SINGLE largest component to avoid 'extra' bits
+    # FOR CLINICAL: We keep only the SINGLE largest component to avoid 'extra' bits
     comp_arr = measure.label(mask)
     n_comps = comp_arr.max()
     if n_comps > 1:
@@ -515,8 +515,8 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, b
         mask = (comp_arr == largest_id).astype(np.uint8)
         print(f"    [CLEAN] Kept largest component ({counts[largest_id-1]:,} voxels), removed {n_comps-1} floating bits.")
 
-    # --- HYBRID RECONSTRUCTION (JPLANNER MODE) ---
-    if is_jplanner and raw_data is not None:
+    # --- HYBRID RECONSTRUCTION (CLINICAL MODE) ---
+    if is_clinical and raw_data is not None:
         print(f"    Step 2: Extracting High-Definition anatomical surface from Raw CT...")
         # 1. Dilate AI mask to create a search zone (approx 5mm)
         dilated_mask = binary_dilation(mask, iterations=5)
@@ -649,22 +649,22 @@ def process_volume(volume_name="S0001", has_metal=False):
         del seg_data_t
         gc.collect()
 
-    if "jplanner" in seg_paths:
-        print(f"\n  [STEP 2.5] Loading JPlanner-A segmentation...")
-        seg_data_j, affine_j = _load_nifti(seg_paths["jplanner"])
-        femur_ids_j, tibia_ids_j = _detect_bone_labels(seg_data_j, "jplanner")
+    if "clinical" in seg_paths:
+        print(f"\n  [STEP 2.5] Loading Precision-A segmentation...")
+        seg_data_j, affine_j = _load_nifti(seg_paths["clinical"])
+        femur_ids_j, tibia_ids_j = _detect_bone_labels(seg_data_j, "clinical")
         
-        # JPlanner is highly reliable for both femur and tibia
+        # Precision is highly reliable for both femur and tibia
         if femur_ids_j:
             femur_mask_j = _build_mask(seg_data_j, femur_ids_j)
             if femur_affine is None: femur_affine = affine_j
-            # If we already have a femur from TS, we can union them or just use JPlanner
-            # Given user is moving to JPlanner, let's prioritize it or union it.
+            # If we already have a femur from TS, we can union them or just use Precision
+            # Given user is moving to Precision, let's prioritize it or union it.
             if femur_primary is None and femur_total is None:
                 femur_primary = femur_mask_j
             else:
                 femur_primary = (femur_primary | femur_mask_j).astype(np.uint8) if femur_primary is not None else femur_mask_j
-            print(f"    Femur (jplanner): {int(np.sum(femur_mask_j)):,} voxels")
+            print(f"    Femur (clinical): {int(np.sum(femur_mask_j)):,} voxels")
             
         if tibia_ids_j:
             tibia_mask_j = _build_mask(seg_data_j, tibia_ids_j)
@@ -673,20 +673,20 @@ def process_volume(volume_name="S0001", has_metal=False):
                 tibia_mask = tibia_mask_j
             else:
                 tibia_mask = (tibia_mask | tibia_mask_j).astype(np.uint8)
-            print(f"    Tibia (jplanner): {int(np.sum(tibia_mask_j)):,} voxels")
+            print(f"    Tibia (clinical): {int(np.sum(tibia_mask_j)):,} voxels")
             
         del seg_data_j
         gc.collect()
 
     # ── 3. Selection & Extension ─────────────────────────────────────────────
-    # Strategy: Prioritize JPlanner-A. Fallback to TotalSegmentator if JPlanner is missing.
+    # Strategy: Prioritize Precision-A. Fallback to TotalSegmentator if Precision is missing.
     print(f"\n  [STEP 3] Selecting Primary Segmentation Source...")
     
-    is_jplanner = "jplanner" in seg_paths
+    is_clinical = "clinical" in seg_paths
     
     # Femur Selection
-    if is_jplanner and femur_ids_j:
-        print("    Femur: Using JPlanner-A (Native)")
+    if is_clinical and femur_ids_j:
+        print("    Femur: Using Precision-A (Native)")
         femur_mask = femur_mask_j
         femur_affine = affine_j
     elif femur_total is not None:
@@ -702,8 +702,8 @@ def process_volume(volume_name="S0001", has_metal=False):
         return
 
     # Tibia Selection
-    if is_jplanner and tibia_ids_j:
-        print("    Tibia: Using JPlanner-A (Native)")
+    if is_clinical and tibia_ids_j:
+        print("    Tibia: Using Precision-A (Native)")
         tibia_mask = tibia_mask_j
         tibia_affine = affine_j
     elif tibia_mask is not None:
@@ -712,10 +712,10 @@ def process_volume(volume_name="S0001", has_metal=False):
         print("    Tibia: Not found.")
     
     # ── 4. Bone Quality Refinement ──────────────────────────────────────────
-    if is_jplanner:
-        # JPlanner-A Specific Clinical Path: Skip noisy TS-style extension and spatial linkage
+    if is_clinical:
+        # Precision-A Specific Clinical Path: Skip noisy TS-style extension and spatial linkage
         # The models already handle connectivity and anatomy correctly.
-        print(f"\n  [STEP 4] JPlanner-A Native Path: Skipping custom anatomical cleanup...")
+        print(f"\n  [STEP 4] Precision-A Native Path: Skipping custom anatomical cleanup...")
         
         # We only do a light fill and closing to ensure watertightness without eroding features
         femur_mask = binary_fill_holes(femur_mask).astype(np.uint8)
@@ -736,7 +736,7 @@ def process_volume(volume_name="S0001", has_metal=False):
                                                            max_distance_mm=40, 
                                                            min_fragment_voxels=5000)
 
-        # Joint Gap Enforcement (Only for legacy, JPlanner models are trained for gap)
+        # Joint Gap Enforcement (Only for legacy, Precision models are trained for gap)
         if tibia_mask is not None:
             voxel_size = _voxel_size_from_affine(femur_affine)
             min_gap_voxels = max(1, int(round(JOINT_GAP_MM / voxel_size)))
@@ -763,7 +763,7 @@ def process_volume(volume_name="S0001", has_metal=False):
         print(f"\nProcessing {bone_name.upper()} ({int(np.sum(mask)):,} voxels)...")
         mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal,
                             closing_mm=closing_mm_map[bone_name], bone_name=bone_name,
-                            is_jplanner=is_jplanner)
+                            is_clinical=is_clinical)
 
         if mesh is not None:
             out_path = output_dir / f"{volume_name}_{bone_name}_full.stl"

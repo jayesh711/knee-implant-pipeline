@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--name", type=str, required=True, help="Patient/Volume name for outputs")
     parser.add_argument("--canal", action="store_true", help="Also run medullary canal analysis (skipped by default)")
     parser.add_argument("--has-metal", action="store_true", help="Enable HU-based hardware filtering for post-op patients with metal implants")
-    parser.add_argument("--use-jplanner", action="store_true", help="Use JPlanner-A ONNX model for segmentation instead of TotalSegmentator")
+    parser.add_argument("--use-clinical", action="store_true", help="Use Precision-A ONNX model for segmentation instead of TotalSegmentator")
     
     args = parser.parse_args()
     
@@ -28,7 +28,7 @@ def main():
     print(f"\n" + "="*70)
     print(f" STARTING FULL CLINICAL RECONSTRUCTION: {name}")
     print(f" INPUT: {dicom_path}")
-    print(f" ENGINE: {'JPlanner-A' if args.use_jplanner else 'TotalSegmentator'}")
+    print(f" ENGINE: {'Precision-A' if args.use_clinical else 'TotalSegmentator'}")
     print("="*70)
     
     python_exe = sys.executable # Use current python (D:\conda_envs\knee-pipeline\python.exe)
@@ -43,7 +43,7 @@ def main():
         run_command([python_exe, "-m", "scripts.ingest_dicom", str(dicom_path), "--name", name])
         
         # 2. AI Segmentation (Bones)
-        seg_script = "scripts.phase1.02_segment_jplanner" if args.use_jplanner else "scripts.phase1.02_segment"
+        seg_script = "scripts.phase1.02_segment_clinical" if args.use_clinical else "scripts.phase1.02_segment"
         run_command([python_exe, "-m", seg_script, "--name", name])
         
         # 3. 3D Mesh Reconstruction (Taubin Smoothing + QEM)
