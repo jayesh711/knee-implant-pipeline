@@ -23,16 +23,18 @@ HU_METAL_MIN     = 2500     # Surgical hardware threshold
 
 # Preprocessing: Phase 1 Foundations
 HU_WINDOW_LOW    = -200
-HU_WINDOW_HIGH   = 3000
+HU_WINDOW_HIGH   = 3071
 HU_BIN_WIDTH     = 25       # 25 HU steps
 NORM_METHOD      = "zscore"
 
 # Mesh Processing Settings
-MAX_TRIANGLES    = 120_000  # Clinical standard for bone meshes (80-120k faces)
-SMOOTH_ITERS     = 30       # Taubin smoothing — clinical grade surface quality
+MAX_TRIANGLES    = 2_000_000  # Matched to JPlanner-A high-fidelity output
+SMOOTH_ITERS     = 50         # Increased for organic surface finish
+MESH_SIGMA       = 0.4        # Preserve more anatomical detail
+REMESHER_TARGET_LEN = 0.3     # Match CT resolution (approx. 0.3mm - 0.5mm)
 TAUBIN_LAMBDA    = 0.5
 TAUBIN_MU        = -0.53
-MAX_HOLE_DIAMETER_MM = 20.0  # Close real gaps; kept below 30 to preserve intercondylar notch
+MAX_HOLE_DIAMETER_MM = 10.0   # Preserve intercondylar notch while closing small gaps
 FEMUR_HEAD_RATIO_MIN = 1.5
 FEMUR_HEAD_RATIO_MAX = 1.8
 SHAFT_BRIDGE_MARGIN_MM = 15.0 # How much to overlap the bridge with the fragments

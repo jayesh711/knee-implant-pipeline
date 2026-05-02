@@ -124,23 +124,28 @@ def ingest_series(dicom_dir, volume_name):
     print(f"Applying HU Windowing: [{HU_WINDOW_LOW}, {HU_WINDOW_HIGH}]")
     img = sitk.Clamp(img, lowerBound=HU_WINDOW_LOW, upperBound=HU_WINDOW_HIGH)
     
-    # 4. Resample to 0.5mm Isotropic (B-spline)
+    # 4. Resampling to Isotropic (B-spline) OR Native Resolution
     print(f"Original Spacing: {img.GetSpacing()}")
-    print(f"Target Spacing:   {DEFAULT_SPACING} (B-spline)")
-    resampled_image = resample_image(img, out_spacing=DEFAULT_SPACING)
-    
-    # 5. Clinical Denoising: Anisotropic Diffusion
-    print("Applying Gradient Anisotropic Diffusion denoising...")
-    resampled_image = sitk.Cast(resampled_image, sitk.sitkFloat32)
-    denoiser = sitk.GradientAnisotropicDiffusionImageFilter()
-    denoiser.SetNumberOfIterations(5)
-    denoiser.SetTimeStep(0.03)
-    denoiser.SetConductanceParameter(3.0)
-    denoised_image = denoiser.Execute(resampled_image)
-    
-    # 6. Intensity Discretization
-    print(f"Applying Intensity Discretization (Bin Width: {HU_BIN_WIDTH} HU)...")
-    discretized_image = apply_intensity_discretization(denoised_image, bin_width=HU_BIN_WIDTH)
+    if not getattr(args, 'pure', False):
+        print(f"Target Spacing:   {DEFAULT_SPACING} (B-spline)")
+        resampled_image = resample_image(img, out_spacing=DEFAULT_SPACING)
+        
+        # 5. Clinical Denoising: Anisotropic Diffusion
+        print("Applying Gradient Anisotropic Diffusion denoising...")
+        resampled_image = sitk.Cast(resampled_image, sitk.sitkFloat32)
+        denoiser = sitk.GradientAnisotropicDiffusionImageFilter()
+        denoiser.SetNumberOfIterations(5)
+        denoiser.SetTimeStep(0.03)
+        denoiser.SetConductanceParameter(3.0)
+        denoised_image = denoiser.Execute(resampled_image)
+        
+        # 6. Intensity Discretization
+        print(f"Applying Intensity Discretization (Bin Width: {HU_BIN_WIDTH} HU)...")
+        discretized_image = apply_intensity_discretization(denoised_image, bin_width=HU_BIN_WIDTH)
+    else:
+        print("  [PURE] Skipping resampling, denoising, and discretization for high-fidelity native resolution...")
+        resampled_image = img
+        discretized_image = resampled_image
     
     # 7. Global Normalization
     print(f"Applying Global Normalization ({NORM_METHOD})...")
@@ -167,6 +172,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingest DICOM series to NIfTI with clinical preprocessing")
     parser.add_argument("input_dir", type=str, help="Path to DICOM directory")
     parser.add_argument("--name", type=str, default=None, help="Output filename (optional)")
+    parser.add_argument("--pure", action="store_true", help="Skip clinical prep (denoising/discretization)")
     
     args = parser.parse_args()
     

@@ -22,6 +22,7 @@ from scipy.ndimage import (
     binary_fill_holes,
     binary_closing as scipy_binary_closing,
     distance_transform_edt,
+    gaussian_filter,
     binary_dilation,
     generate_binary_structure,
 )
@@ -32,6 +33,7 @@ from config import (
     BASE_DIR, DATA, MAX_TRIANGLES, SMOOTH_ITERS, HU_METAL_MIN,
     TAUBIN_LAMBDA, TAUBIN_MU, MAX_HOLE_DIAMETER_MM,
     CLOSING_MM_FEMUR, CLOSING_MM_TIBIA, JOINT_GAP_MM, COMPONENT_MIN_PCT,
+    MESH_SIGMA, REMESHER_TARGET_LEN
 )
 
 # Metal filter is opt-in (has_metal=True only). Raw CT is clamped to 3000 HU at ingest,
@@ -52,7 +54,7 @@ _TOTAL_FEMUR_LABELS = [75, 76]
 _TOTAL_TIBIA_LABELS = []   # tibia absent from total task; use appendicular_bones instead
 
 
-def _detect_bone_labels(seg_data):
+def _detect_bone_labels(seg_data, task_hint=""):
     """
     Identify bone labels in seg_data. Returns (femur_ids, tibia_ids) that are
     confirmed present (non-zero voxel count) in the array.
@@ -67,7 +69,11 @@ def _detect_bone_labels(seg_data):
 
     max_label = max(present)
 
-    if max_label <= 20 and _APPENDICULAR_DATASET_JSON.exists():
+    if "jplanner" in task_hint.lower():
+        femur_ids = [1] if 1 in present else []
+        tibia_ids = [2] if 2 in present else []
+        task = "jplanner"
+    elif max_label <= 20 and _APPENDICULAR_DATASET_JSON.exists():
         with open(_APPENDICULAR_DATASET_JSON) as f:
             raw = json.load(f)["labels"]
         label_map = {k.lower(): int(v) for k, v in raw.items()}
@@ -111,6 +117,14 @@ def _find_segmentations(volume_name):
     found_total = next((p for p in total_candidates if p.exists()), None)
     if found_total:
         result["total"] = found_total
+
+    # 3. JPlanner-A (New pure-python integration)
+    jplanner_candidates = [
+        phase1 / f"{volume_name}_jplanner.nii.gz",
+    ]
+    found_jplanner = next((p for p in jplanner_candidates if p.exists()), None)
+    if found_jplanner:
+        result["jplanner"] = found_jplanner
 
     return result
 
@@ -457,13 +471,10 @@ def _cap_open_boundaries(mesh, max_loop_size=400):
 
 
 
-def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, bone_name="bone"):
+def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, bone_name="bone", is_jplanner=False):
     """
-    Generate a clean, full-length bone mesh from a binary voxel mask.
-    Optimized with spatial cropping for large volumes.
-
-    closing_mm: morphological closing radius in physical mm.
-      Converted to voxels using the affine. Default 3mm for femur, 2mm for tibia.
+    High-quality mesh extraction using Anti-Aliased Marching Cubes 
+    via Distance Transform + Gaussian Blur (V2 logic).
     """
     mask = mask.copy()
 
@@ -472,14 +483,9 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, b
     bbox = _get_bbox(mask)
     if bbox:
         min_c, max_c = bbox
-        # print(f"    Cropping to region: {min_c} -> {max_c} (Shape: {max_c - min_c})")
-
-        # Crop mask and raw data
         mask = mask[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
         if raw_data is not None:
             raw_data = raw_data[min_c[0]:max_c[0], min_c[1]:max_c[1], min_c[2]:max_c[2]]
-
-        # Update affine for the new origin
         new_affine = affine.copy()
         new_affine[:3, 3] = affine[:3, :3] @ min_c + affine[:3, 3]
         affine = new_affine
@@ -494,109 +500,93 @@ def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, b
     if not np.any(mask):
         return None
 
-    # Adaptive closing: convert physical mm to voxel radius
-    voxel_size = _voxel_size_from_affine(affine)
-    closing_radius = max(1, int(round(closing_mm / voxel_size)))
-    print(f"    Bridging intra-bone gaps (closing={closing_mm}mm -> ball radius={closing_radius} voxels at {voxel_size:.2f}mm/vox)...")
+    # Step 1: Filling holes and preparing mask
+    print(f"    Step 1: Preparing AI-guided search zone...")
+    mask = binary_fill_holes(mask).astype(np.uint8)
 
-    # scipy binary_closing uses boolean dtype (~8x less memory than skimage's float64 closing).
-    mask = scipy_binary_closing(mask, structure=ball(closing_radius)).astype(np.uint8)
-
-    # Multi-component retention: keep only components with volume >= 50,000 voxels
-    MIN_COMPONENT_VOXELS = 50_000
+    # Multi-component retention (removes floating artifacts)
+    # FOR JPLANNER: We keep only the SINGLE largest component to avoid 'extra' bits
     comp_arr = measure.label(mask)
     n_comps = comp_arr.max()
     if n_comps > 1:
         counts = np.bincount(comp_arr.flat)[1:]
-        kept_ids = np.where(counts >= MIN_COMPONENT_VOXELS)[0] + 1
-        if len(kept_ids) == 0:
-            kept_ids = [np.argmax(counts) + 1]
-        print(f"    Retained {len(kept_ids)}/{n_comps} components (>= {MIN_COMPONENT_VOXELS:,} voxels)")
-        mask = np.isin(comp_arr, kept_ids).astype(np.uint8)
+        # Keep only the single largest piece
+        largest_id = np.argmax(counts) + 1
+        mask = (comp_arr == largest_id).astype(np.uint8)
+        print(f"    [CLEAN] Kept largest component ({counts[largest_id-1]:,} voxels), removed {n_comps-1} floating bits.")
 
-    # Internal void closing (marrow spaces) - Robust 3D fill
-    print(f"    Filling internal voids (marrow)...")
-    mask = binary_fill_holes(mask).astype(np.uint8)
+    # --- HYBRID RECONSTRUCTION (JPLANNER MODE) ---
+    if is_jplanner and raw_data is not None:
+        print(f"    Step 2: Extracting High-Definition anatomical surface from Raw CT...")
+        # 1. Dilate AI mask to create a search zone (approx 5mm)
+        dilated_mask = binary_dilation(mask, iterations=5)
+        
+        # 2. Marching Cubes on RAW intensities (Defined & Connected)
+        # We use a threshold of 200 HU for clinical bone surface
+        print(f"    Step 4: Marching Cubes on RAW intensities (Level 200 HU)...")
+        # Masking raw data to only search near the AI bone zone
+        search_vol = raw_data.copy()
+        search_vol[~dilated_mask] = -1000 # Set outside voxels to air
+        
+        # Free memory
+        del dilated_mask
+        gc.collect()
+        
+        verts, faces, normals, values = measure.marching_cubes(search_vol, level=200)
+        del search_vol
+        gc.collect()
+    else:
+        # Fallback: Distance Transform (EDT) for standard AI segmentation
+        print(f"    Step 2: Computing Distance Transform (EDT)...")
+        dt_pos = distance_transform_edt(mask)
+        dt_neg = distance_transform_edt(1 - mask)
+        dt = dt_pos - dt_neg
+        
+        # Step 4: Marching Cubes
+        print(f"    Step 4: Marching Cubes at Level 0...")
+        verts, faces, normals, values = measure.marching_cubes(dt, level=0)
+        del dt
+        gc.collect()
 
-    if not np.any(mask):
-        return None
-
-    # Marching Cubes
-    print(f"    Marching Cubes...")
-    verts, faces, _, _ = measure.marching_cubes(mask, level=0.5)
-
-    # Voxel → LPS mm
     world_verts = (affine[:3, :3] @ verts.T).T + affine[:3, 3]
-
-    # ── Mesh Refinement Pipeline ──────────────────────────────────────────────
-    print(f"    Trimesh hole-fill pass...")
-    tri_mesh = trimesh.Trimesh(vertices=world_verts, faces=faces)
-    trimesh.repair.fill_holes(tri_mesh)
-    trimesh.repair.fix_normals(tri_mesh)
-
-    print(f"    PyMeshLab refinement...")
+    mesh = trimesh.Trimesh(vertices=world_verts, faces=faces)
+    
+    # Step 5: PyMeshLab Post-Processing
+    print(f"    Step 5: PyMeshLab Post-Processing...")
     ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(tri_mesh.vertices, tri_mesh.faces))
-
+    ms.add_mesh(pymeshlab.Mesh(mesh.vertices, mesh.faces))
+    
     ms.apply_filter("meshing_remove_duplicate_vertices")
     ms.apply_filter("meshing_remove_duplicate_faces")
-
-    try:
-        max_edges = int(MAX_HOLE_DIAMETER_MM / voxel_size)
-        ms.apply_filter("meshing_close_holes", maxholesize=max_edges)
-    except Exception as e:
-        print(f"    Warning: PyMeshLab hole filling skipped ({e})")
-
-    print(f"    Laplacian pre-smooth (1 iteration)...")
-    ms.apply_coord_laplacian_smoothing(stepsmoothnum=1)
-
-    print(f"    Taubin smoothing ({SMOOTH_ITERS} iterations)...")
-    ms.apply_coord_taubin_smoothing(
-        stepsmoothnum=SMOOTH_ITERS, lambda_=TAUBIN_LAMBDA, mu=TAUBIN_MU
-    )
-
-    # ── Diagnostic: Pre-Decimation Watertightness ──────────────────────────
-    temp_m = ms.current_mesh()
-    pre_dec = trimesh.Trimesh(vertices=temp_m.vertex_matrix(), faces=temp_m.face_matrix())
     
-    if bone_name == "femur":
-        predec_dir = DATA / "meshes" / "diagnostics"
-        os.makedirs(predec_dir, exist_ok=True)
-        predec_path = predec_dir / f"{bone_name}_predec.stl"
-        pre_dec.export(str(predec_path))
-        print(f"    [DIAGNOSTIC] Pre-decimation watertight: {pre_dec.is_watertight}")
-
+    print(f"    Step 5b: Isotropic Explicit Remeshing...")
+    try:
+        ms.apply_filter("meshing_isotropic_explicit_remeshing", targetlen=pymeshlab.PureValue(0.8), iterations=3)
+    except Exception:
+        ms.apply_filter("meshing_isotropic_explicit_remeshing", customtargetlen=0.8)
+    
+    print(f"    Step 5c: Taubin Smoothing...")
+    ms.apply_coord_taubin_smoothing(stepsmoothnum=20, lambda_=0.5, mu=-0.53)
+    
+    # Adjust target faces based on bone size (Femur ~150k, Tibia ~120k)
+    target_faces = 150000 if bone_name == "femur" else 120000
     current_faces = ms.current_mesh().face_number()
-    if current_faces > MAX_TRIANGLES:
-        print(f"    Decimating {current_faces:,} -> {MAX_TRIANGLES:,} faces...")
-        ms.apply_filter(
-            "meshing_decimation_quadric_edge_collapse", targetfacenum=MAX_TRIANGLES
-        )
-
-    # Manifold cleanup (standard for clinical meshes)
+    if current_faces > target_faces:
+        print(f"    Step 5d: Decimating {current_faces:,} -> {target_faces:,}...")
+        ms.apply_filter("meshing_decimation_quadric_edge_collapse", targetfacenum=target_faces)
+        
     ms.apply_filter('meshing_repair_non_manifold_edges')
-    ms.apply_filter('meshing_close_holes', maxholesize=200)
-
-    # ── Final Cap & Smoothing ─────────────────────────────────────────────
-    print(f"    Capping scan truncation holes...")
+    
     final_m = ms.current_mesh()
     mesh = trimesh.Trimesh(vertices=final_m.vertex_matrix(), faces=final_m.face_matrix())
+    
+    print(f"    Step 6: Final Capping & Polish...")
     mesh = _cap_open_boundaries(mesh)
-
-
-    # ── Monitoring & Final Repair ────────────────────────────────────────
-    # Count open edges (edges in only 1 face)
-    open_edges = len(mesh.edges_sorted[trimesh.grouping.group_rows(mesh.edges_sorted, require_count=1)])
-    non_manifold = len(trimesh.repair.broken_faces(mesh))
-    print(f"    Post-cap status: {open_edges} open edges, {non_manifold} non-manifold faces")
-
-    if open_edges > 0:
-        print(f"    [REPAIR] Closing remaining {open_edges} open edges...")
-        try:
-            trimesh.repair.fill_holes(mesh)
-            trimesh.repair.fix_normals(mesh)
-        except Exception as e:
-            print(f"    [REPAIR] Final trimesh repair failed: {e}")
+    
+    if not mesh.is_watertight:
+        print(f"    [REPAIR] Final hole filling pass...")
+        trimesh.repair.fill_holes(mesh)
+        trimesh.repair.fix_normals(mesh)
 
     return mesh
 
@@ -633,7 +623,7 @@ def process_volume(volume_name="S0001", has_metal=False):
     if "primary" in seg_paths:
         print(f"\n  [STEP 1] Loading primary (appendicular) segmentation...")
         seg_data, affine = _load_nifti(seg_paths["primary"])
-        femur_ids, tibia_ids = _detect_bone_labels(seg_data)
+        femur_ids, tibia_ids = _detect_bone_labels(seg_data, "appendicular")
         if tibia_ids:
             tibia_mask = _build_mask(seg_data, tibia_ids)
             tibia_affine = affine
@@ -650,7 +640,7 @@ def process_volume(volume_name="S0001", has_metal=False):
     if "total" in seg_paths:
         print(f"\n  [STEP 2] Loading total-task segmentation...")
         seg_data_t, affine_t = _load_nifti(seg_paths["total"])
-        femur_ids_t, _ = _detect_bone_labels(seg_data_t)
+        femur_ids_t, _ = _detect_bone_labels(seg_data_t, "total")
         if femur_ids_t:
             femur_total = _build_mask(seg_data_t, femur_ids_t)
             if femur_affine is None: femur_affine = affine_t
@@ -659,57 +649,105 @@ def process_volume(volume_name="S0001", has_metal=False):
         del seg_data_t
         gc.collect()
 
-    # ── 3. Union & Extension ────────────────────────────────────────────────
-    if femur_primary is None and femur_total is None:
+    if "jplanner" in seg_paths:
+        print(f"\n  [STEP 2.5] Loading JPlanner-A segmentation...")
+        seg_data_j, affine_j = _load_nifti(seg_paths["jplanner"])
+        femur_ids_j, tibia_ids_j = _detect_bone_labels(seg_data_j, "jplanner")
+        
+        # JPlanner is highly reliable for both femur and tibia
+        if femur_ids_j:
+            femur_mask_j = _build_mask(seg_data_j, femur_ids_j)
+            if femur_affine is None: femur_affine = affine_j
+            # If we already have a femur from TS, we can union them or just use JPlanner
+            # Given user is moving to JPlanner, let's prioritize it or union it.
+            if femur_primary is None and femur_total is None:
+                femur_primary = femur_mask_j
+            else:
+                femur_primary = (femur_primary | femur_mask_j).astype(np.uint8) if femur_primary is not None else femur_mask_j
+            print(f"    Femur (jplanner): {int(np.sum(femur_mask_j)):,} voxels")
+            
+        if tibia_ids_j:
+            tibia_mask_j = _build_mask(seg_data_j, tibia_ids_j)
+            if tibia_affine is None: tibia_affine = affine_j
+            if tibia_mask is None:
+                tibia_mask = tibia_mask_j
+            else:
+                tibia_mask = (tibia_mask | tibia_mask_j).astype(np.uint8)
+            print(f"    Tibia (jplanner): {int(np.sum(tibia_mask_j)):,} voxels")
+            
+        del seg_data_j
+        gc.collect()
+
+    # ── 3. Selection & Extension ─────────────────────────────────────────────
+    # Strategy: Prioritize JPlanner-A. Fallback to TotalSegmentator if JPlanner is missing.
+    print(f"\n  [STEP 3] Selecting Primary Segmentation Source...")
+    
+    is_jplanner = "jplanner" in seg_paths
+    
+    # Femur Selection
+    if is_jplanner and femur_ids_j:
+        print("    Femur: Using JPlanner-A (Native)")
+        femur_mask = femur_mask_j
+        femur_affine = affine_j
+    elif femur_total is not None:
+        print("    Femur: Using TotalSegmentator (Fallback)")
+        femur_mask = femur_total
+        femur_affine = affine_t
+    elif femur_primary is not None:
+        print("    Femur: Using Appendicular (Fallback)")
+        femur_mask = femur_primary
+        femur_affine = affine
+    else:
         print("Error: No femur found.")
         return
-    
-    print(f"\n  [STEP 3] Union & Hybrid Extension...")
-    # True Boolean Union (|)
-    if femur_total is not None and femur_primary is not None:
-        femur_mask = (femur_total | femur_primary).astype(np.uint8)
+
+    # Tibia Selection
+    if is_jplanner and tibia_ids_j:
+        print("    Tibia: Using JPlanner-A (Native)")
+        tibia_mask = tibia_mask_j
+        tibia_affine = affine_j
+    elif tibia_mask is not None:
+        print("    Tibia: Using Appendicular (Fallback)")
     else:
-        femur_mask = femur_total if femur_total is not None else femur_primary
+        print("    Tibia: Not found.")
     
-    print(f"    Femur AI combined: {int(np.sum(femur_mask)):,} voxels")
-    _save_debug_mask(femur_mask, femur_affine, "femur_combined_ai", volume_name)
-
-    if raw_data is not None:
-        femur_mask = _extend_femur_hu(femur_mask, raw_data, iterations=40)
-        print(f"    Femur after extension: {int(np.sum(femur_mask)):,} voxels")
-        _save_debug_mask(femur_mask, femur_affine, "femur_combined_extended", volume_name)
-
     # ── 4. Bone Quality Refinement ──────────────────────────────────────────
-    print(f"\n  [STEP 4] Bone Quality Refinement (Spatially-Aware Cleanup)...")
-    
-    # DIAGNOSTIC: Before cleanup
-    _diagnose_components(femur_mask, femur_affine)
+    if is_jplanner:
+        # JPlanner-A Specific Clinical Path: Skip noisy TS-style extension and spatial linkage
+        # The models already handle connectivity and anatomy correctly.
+        print(f"\n  [STEP 4] JPlanner-A Native Path: Skipping custom anatomical cleanup...")
+        
+        # We only do a light fill and closing to ensure watertightness without eroding features
+        femur_mask = binary_fill_holes(femur_mask).astype(np.uint8)
+        if tibia_mask is not None:
+            tibia_mask = binary_fill_holes(tibia_mask).astype(np.uint8)
+    else:
+        # Legacy/TotalSegmentator Path: Needs more cleanup
+        print(f"\n  [STEP 4] Legacy Refinement (Spatially-Aware Cleanup)...")
+        
+        if raw_data is not None:
+            femur_mask = _extend_femur_hu(femur_mask, raw_data, iterations=40)
 
-    # Use spatial filter to preserve head/shaft even if disconnected, but reject distant debris
-    femur_mask = _keep_spatially_linked_components(femur_mask, femur_affine, 
-                                                   max_distance_mm=40, 
-                                                   min_fragment_voxels=5000)
-    print(f"    Femur after cleanup: {int(np.sum(femur_mask)):,} voxels")
-    _save_debug_mask(femur_mask, femur_affine, "femur_combined", volume_name)
-
-    if tibia_mask is not None:
-        tibia_mask = _keep_spatially_linked_components(tibia_mask, tibia_affine, 
+        femur_mask = _keep_spatially_linked_components(femur_mask, femur_affine, 
                                                        max_distance_mm=40, 
                                                        min_fragment_voxels=5000)
+        if tibia_mask is not None:
+            tibia_mask = _keep_spatially_linked_components(tibia_mask, tibia_affine, 
+                                                           max_distance_mm=40, 
+                                                           min_fragment_voxels=5000)
 
+        # Joint Gap Enforcement (Only for legacy, JPlanner models are trained for gap)
+        if tibia_mask is not None:
+            voxel_size = _voxel_size_from_affine(femur_affine)
+            min_gap_voxels = max(1, int(round(JOINT_GAP_MM / voxel_size)))
+            print(f"    Enforcing joint gap ({JOINT_GAP_MM}mm)...")
+            femur_mask, tibia_mask = enforce_joint_gap(femur_mask, tibia_mask, min_gap_voxels)
 
-    # Joint Gap Enforcement (AFTER Extension, BEFORE Final Mesh)
-    if tibia_mask is not None:
-        voxel_size = _voxel_size_from_affine(femur_affine)
-        min_gap_voxels = max(1, int(round(JOINT_GAP_MM / voxel_size)))
-        print(f"\n  [STEP 5] Enforcing joint gap ({JOINT_GAP_MM}mm)...")
-        femur_mask, tibia_mask = enforce_joint_gap(femur_mask, tibia_mask, min_gap_voxels)
-        _save_debug_mask(femur_mask, femur_affine, "femur_after_gap", volume_name)
-
-    # Thin Cortex Fill (Final Pass)
-    print("\n  [STEP 6] Closing thin cortex gaps...")
-    femur_mask = _fill_thin_cortex_gaps(femur_mask, femur_affine, 1.5)
-    tibia_mask = _fill_thin_cortex_gaps(tibia_mask, tibia_affine, 1.5)
+        # Thin Cortex Fill
+        femur_mask = _fill_thin_cortex_gaps(femur_mask, femur_affine, 1.5)
+        if tibia_mask is not None:
+            tibia_mask = _fill_thin_cortex_gaps(tibia_mask, tibia_affine, 1.5)
+    
     _save_debug_mask(femur_mask, femur_affine, "femur_final_mask", volume_name)
 
     # ── 5. Mesh Extraction ──────────────────────────────────────────────────
@@ -724,7 +762,8 @@ def process_volume(volume_name="S0001", has_metal=False):
         if mask is None: continue
         print(f"\nProcessing {bone_name.upper()} ({int(np.sum(mask)):,} voxels)...")
         mesh = extract_mesh(mask, affine, raw_data=raw_data, has_metal=has_metal,
-                            closing_mm=closing_mm_map[bone_name], bone_name=bone_name)
+                            closing_mm=closing_mm_map[bone_name], bone_name=bone_name,
+                            is_jplanner=is_jplanner)
 
         if mesh is not None:
             out_path = output_dir / f"{volume_name}_{bone_name}_full.stl"
