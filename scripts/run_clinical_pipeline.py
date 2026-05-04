@@ -28,7 +28,8 @@ def main():
     print(f" INPUT: {dicom_path}")
     print("="*70)
     
-    python_exe = sys.executable
+    # Use the Slicer-integrated Python which has SimpleITK and medical libs
+    python_exe = r"D:\3D Slicer 5.10.0\bin\PythonSlicer.exe"
     
     # Set PYTHONPATH to project root
     project_root = str(Path(__file__).parent.parent)

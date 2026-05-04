@@ -24,3 +24,4 @@ dependencies:
       - monai
       - python-dotenv
       - pyyaml
+      - onnxruntime-gpu
