@@ -104,50 +104,71 @@ def _cap_open_boundaries(mesh, max_loop_size=1000):
     import numpy as np
 
     try:
-        if hasattr(mesh, 'is_watertight') and mesh.is_watertight: return mesh
-    except: pass
+        # Check if already watertight
+        if hasattr(mesh, 'is_watertight'):
+            is_wt = mesh.is_watertight
+            if isinstance(is_wt, (bool, np.bool_)) and is_wt:
+                return mesh
+    except:
+        pass
 
     print(f"    [CAP] Closing open boundaries (Euler: {int(mesh.euler_number)})...")
     try:
+        # Step 1: trimesh native fill for small holes
         trimesh.repair.fill_holes(mesh)
         
+        # Step 2: Manual cap for large/shaft openings
         outline = mesh.outline()
-        if not outline or not hasattr(outline, 'entities') or not outline.entities: 
+        if outline is None:
+            return mesh
+            
+        if not hasattr(outline, 'entities') or len(outline.entities) == 0:
             return mesh
         
-        verts = np.array(mesh.vertices.copy())
-        faces = np.array(mesh.faces.copy())
-        z_min = float(np.min(verts[:, 2]))
-        z_max = float(np.max(verts[:, 2]))
+        # Use lists for building new geometry (faster and avoids vstack warnings)
+        current_verts = list(mesh.vertices)
+        current_faces = list(mesh.faces)
         
+        verts_arr = np.array(mesh.vertices)
+        z_min = float(np.min(verts_arr[:, 2]))
+        z_max = float(np.max(verts_arr[:, 2]))
+        
+        added_any = False
         for entity in outline.entities:
-            loop = getattr(entity, 'nodes', getattr(entity, 'points', None))
-            if loop is None: continue
-            if len(loop) < 3: continue
+            # entities in Path3D have a 'nodes' attribute for indices
+            loop = getattr(entity, 'nodes', None)
+            if loop is None:
+                continue
             
-            loop_pts = verts[loop]
+            loop_indices = np.asanyarray(loop).flatten()
+            if len(loop_indices) < 3:
+                continue
+            
+            loop_pts = verts_arr[loop_indices]
             centroid = np.mean(loop_pts, axis=0)
             
-            # Defensive check for shaft
+            # Defensive check for shaft - proximal/distal ends
             z_val = float(centroid[2])
-            is_near_z = (abs(z_val - z_max) < 5.0) or (abs(z_val - z_min) < 5.0)
-            is_large = (len(loop) > 50)
+            is_near_z = (abs(z_val - z_max) < 10.0) or (abs(z_val - z_min) < 10.0)
+            is_large = (len(loop_indices) > 30)
             
             if is_near_z or is_large:
-                center_idx = len(verts)
-                new_v = np.array(centroid).reshape(1, 3)
-                verts = np.vstack([verts, new_v])
+                center_idx = len(current_verts)
+                current_verts.append(centroid)
                 
-                for j in range(len(loop)):
-                    v1 = int(loop[j])
-                    v2 = int(loop[(j + 1) % len(loop)])
-                    faces = np.vstack([faces, [center_idx, v1, v2]])
+                for j in range(len(loop_indices)):
+                    v1 = int(loop_indices[j])
+                    v2 = int(loop_indices[(j + 1) % len(loop_indices)])
+                    current_faces.append([center_idx, v1, v2])
+                added_any = True
 
-        mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
-        trimesh.repair.fix_normals(mesh)
+        if added_any:
+            mesh = trimesh.Trimesh(vertices=current_verts, faces=current_faces, process=True)
+            trimesh.repair.fix_normals(mesh)
+        
         return mesh
     except Exception as e:
-        print(f"    [CAP] Error at {bone_name if 'bone_name' in locals() else 'mesh'}: {str(e)}")
+        print(f"    [CAP] Warning: Manual capping failed, returning original mesh. Error: {str(e)}")
         return mesh
 
 def extract_mesh(mask, affine, raw_data=None, has_metal=False, closing_mm=3.0, bone_name="bone", is_clinical=False):

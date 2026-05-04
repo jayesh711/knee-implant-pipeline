@@ -17,7 +17,7 @@ MIN_BONE_VOLUME_CC = 100.0  # Threshold for bone detection
 # HU thresholds (Clinical CT Values)
 HU_CORTICAL_MIN  = 700
 HU_SPONGY_MAX    = 300
-HU_BONE_MIN      = 150      # Broad bone signal including spongy/osteopenic
+HU_BONE_MIN      = 250      # Finalized threshold for clinical-grade bone surface precision
 HU_BONE_MAX      = 2500     # Maximum bone HU for segmentation
 HU_CANAL_MAX     = 400
 HU_METAL_MIN     = 2500     # Surgical hardware threshold
